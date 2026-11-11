@@ -1,0 +1,17 @@
+{
+  "name": "@local/remote-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zero-dependency remote desktop agent: X11 screen capture, mouse/keyboard injection, remote shell and file transfer over HTTP/WebSocket",
+  "type": "module",
+  "bin": {
+    "remote-agent": "./remote-agent.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "remote-agent.mjs",
+    "lib/*.mjs"
+  ]
+}

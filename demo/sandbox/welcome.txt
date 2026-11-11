@@ -1,0 +1,2 @@
+This directory is the file-transfer sandbox of the demo agent.
+Use the file drawer in the remote desktop panel to browse, download and upload files here.

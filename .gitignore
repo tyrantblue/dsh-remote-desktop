@@ -1,0 +1,7 @@
+node_modules/
+*.log
+/tmp/
+demo/*.tmp
+test/.tmp/
+.DS_Store
+demo/.demo.pids
