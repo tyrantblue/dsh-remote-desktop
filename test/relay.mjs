@@ -295,6 +295,25 @@ function hubStats(hub) {
   return { agents: NaN, clients: NaN };
 }
 
+function hubCodes(hub) {
+  try {
+    const value = typeof hub.codes === 'function' ? hub.codes() : hub.codes;
+    return Array.isArray(value) ? value.map((code) => String(code)) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Trimmed content of a relay code file, or null when it does not exist yet. */
+function readCodeFile(codeFile) {
+  try {
+    const text = fs.readFileSync(codeFile, 'utf8').trim();
+    return text.length > 0 ? text : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---- HTTP client through the relay ----------------------------------------
 
 function createRelayHttp(relayBase) {
@@ -718,12 +737,18 @@ async function startAgent({
   label,
   display = null,
   relayPort,
-  relayCode,
+  relayCode = null,
+  relayCodeFile = null,
   fsRootDir,
   noScreen = false,
   envExtra = {},
   password = PASSWORD,
 }) {
+  assert(
+    Boolean(relayCode) || Boolean(relayCodeFile),
+    `agent "${label}": pass --relay-code and/or --relay-code-file`,
+  );
+  const codeRe = /^[A-Za-z0-9_-]{6,32}$/;
   const localPort = await findFreePort(38300 + ctx.agents.length * 3);
   const agentLog = path.join(ctx.tmpDir, `agent-${label}.log`);
   fs.writeFileSync(agentLog, '');
@@ -739,9 +764,9 @@ async function startAgent({
     fsRootDir,
     '--relay',
     `ws://127.0.0.1:${relayPort}`,
-    '--relay-code',
-    relayCode,
   ];
+  if (relayCode) args.push('--relay-code', relayCode);
+  if (relayCodeFile) args.push('--relay-code-file', relayCodeFile);
   if (display) args.push('--display', display);
   if (noScreen) args.push('--no-screen');
 
@@ -753,8 +778,39 @@ async function startAgent({
   });
   fs.closeSync(logFd);
 
-  const instance = { label, proc, pid: proc.pid, localPort, agentLog, relayCode, fsRootDir, stopped: false };
+  const instance = {
+    label,
+    proc,
+    pid: proc.pid,
+    localPort,
+    agentLog,
+    relayCode: relayCode || null,
+    relayCodeFile: relayCodeFile || null,
+    fsRootDir,
+    stopped: false,
+  };
   ctx.agents.push(instance);
+
+  // With --relay-code-file (and no explicit --relay-code) the effective code
+  // only exists after the Agent has generated/read the file; wait for it, then
+  // for the tunnel registration. With an explicit --relay-code the explicit
+  // value wins and the Agent writes it back to the file.
+  if (relayCodeFile && !relayCode) {
+    await waitFor(
+      () => {
+        if (proc.exitCode !== null || proc.signalCode !== null) {
+          throw new Error(
+            `agent "${label}" exited early (code=${proc.exitCode}, signal=${proc.signalCode}); log:\n${tailFile(agentLog)}`,
+          );
+        }
+        const code = readCodeFile(relayCodeFile);
+        return code && codeRe.test(code) ? code : false;
+      },
+      { timeoutMs: 15000, intervalMs: 50, label: `agent "${label}" to generate/write a valid code file` },
+    );
+    instance.relayCode = readCodeFile(relayCodeFile);
+    assertMatch(instance.relayCode, codeRe, `agent "${label}" persisted relay code format`);
+  }
 
   await waitFor(
     async () => {
@@ -763,17 +819,33 @@ async function startAgent({
           `agent "${label}" exited early (code=${proc.exitCode}, signal=${proc.signalCode}); log:\n${tailFile(agentLog)}`,
         );
       }
-      return hubStats(ctx.hub).agents >= ctx.expectedAgents;
+      if (hubStats(ctx.hub).agents < ctx.expectedAgents) return false;
+      return hubCodes(ctx.hub).includes(instance.relayCode);
     },
-    { timeoutMs: 25000, intervalMs: 100, label: `agent "${label}" to register through the relay` },
+    { timeoutMs: 25000, intervalMs: 100, label: `agent "${label}" to register code ${instance.relayCode} through the relay` },
   );
 
   // The relay client is implemented in the Agent; a registered tunnel without
-  // the documented connection log would be suspicious.
-  const log = tailFile(agentLog, 6000);
+  // the documented startup/connection log would be suspicious.
+  const log = tailFile(agentLog, 8000);
   assertIncludes(log, '[relay]', `agent "${label}" log must mention relay status`);
-  if (!noScreen) {
-    assertMatch(log, new RegExp(relayCode), `agent "${label}" log must print the relay code`);
+  assertIncludes(log, `[relay] code: ${instance.relayCode}`, `agent "${label}" log must print the effective relay code`);
+  // The connected line is written right after the tunnel opens, which races the
+  // hub-side registration assertion above; wait for it instead of reading once.
+  await waitFor(
+    () => {
+      if (proc.exitCode !== null || proc.signalCode !== null) return false;
+      return tailFile(agentLog, 8000).includes('[relay] connected');
+    },
+    { timeoutMs: 8000, intervalMs: 50, label: `agent "${label}" log to report a connected relay tunnel` },
+  );
+  assertIncludes(tailFile(agentLog, 8000), '[relay] connected', `agent "${label}" log must report a connected relay tunnel`);
+  if (relayCodeFile) {
+    await waitFor(() => readCodeFile(relayCodeFile) === instance.relayCode, {
+      timeoutMs: 8000,
+      intervalMs: 50,
+      label: `agent "${label}" code file to contain the effective code`,
+    });
   }
   return instance;
 }
@@ -1286,13 +1358,131 @@ async function main() {
       await waitFor(() => hubStats(ctx.hub).agents === 1, { timeoutMs: 8000, intervalMs: 100, label: 'relay stats.agents after win32 agent exit' });
     });
 
-    await testCase('13 cleanup: stats back to zero, no residue', async () => {
+    await testCase('13 relay-code-file: first run writes a persistent code, restart reuses it, old panel code works', async () => {
+      const codeFile = path.join(ctx.tmpDir, 'relay-code.txt');
+      const codeRe = /^[A-Za-z0-9_-]{6,32}$/;
+
+      ctx.expectedAgents = 2; // main linux agent + this no-screen agent
+      const first = await startAgent({
+        ctx,
+        label: 'codefile-run1',
+        relayPort: ctx.relay.port,
+        relayCodeFile: codeFile,
+        fsRootDir: path.join(ctx.tmpDir, 'fs-codefile-1'),
+        noScreen: true,
+      });
+      const code1 = first.relayCode;
+      assertMatch(code1, codeRe, 'first-run persisted code format');
+      assertEqual(fs.readFileSync(codeFile, 'utf8').trim(), code1, 'first-run code file content');
+      assertIncludes(hubCodes(ctx.hub), code1, 'hub must know the code from the file');
+      assertIncludes(tailFile(first.agentLog, 8000), `[relay] code: ${code1}`, 'first-run log prints the persisted code');
+
+      // A panel that saved this code can authenticate and read info.
+      const panelHttp = createRelayHttp(relayClientBase(ctx.relay.port, code1));
+      const panelAuth = await waitForRelayAuth(panelHttp, PASSWORD);
+      const panelInfo = await panelHttp.request('/api/info', { token: panelAuth.token });
+      assertEqual(panelInfo.status, 200, 'panel auth/info with the persisted code');
+      assertEqual(panelInfo.json.agent.platform, 'linux', 'panel info.agent.platform');
+      assertEqual(panelInfo.json.protocol, 1, 'panel info.protocol');
+
+      const beforeRestart = fs.readFileSync(codeFile);
+      assertEqual(await stopAgent(first), 0, 'first code-file agent SIGINT exit code');
+      await waitFor(() => !hubCodes(ctx.hub).includes(code1), { timeoutMs: 8000, intervalMs: 100, label: 'hub to drop the first code-file tunnel' });
+      ctx.expectedAgents = hubStats(ctx.hub).agents;
+      assert(fs.readFileSync(codeFile).equals(beforeRestart), 'code file must not change on shutdown');
+
+      // Same arguments again: the Agent must reuse the code instead of generating one.
+      ctx.expectedAgents = 2;
+      const second = await startAgent({
+        ctx,
+        label: 'codefile-run2',
+        relayPort: ctx.relay.port,
+        relayCodeFile: codeFile,
+        fsRootDir: path.join(ctx.tmpDir, 'fs-codefile-2'),
+        noScreen: true,
+      });
+      assertEqual(second.relayCode, code1, 'restart must reuse the persisted relay code');
+      assert(fs.readFileSync(codeFile).equals(beforeRestart), 'code file must stay byte-identical on restart');
+      assertIncludes(hubCodes(ctx.hub), code1, 'hub must register the reused code');
+      assertIncludes(tailFile(second.agentLog, 8000), `[relay] code: ${code1}`, 'restart log prints the reused code');
+
+      // The old panel's saved code still works after the Agent restart.
+      const panelHttp2 = createRelayHttp(relayClientBase(ctx.relay.port, code1));
+      const panelAuth2 = await waitForRelayAuth(panelHttp2, PASSWORD);
+      const panelInfo2 = await panelHttp2.request('/api/info', { token: panelAuth2.token });
+      assertEqual(panelInfo2.status, 200, 'saved panel code must still authenticate after restart');
+      assertEqual(panelInfo2.json.agent.platform, 'linux', 'panel info.platform after restart');
+
+      assertEqual(await stopAgent(second), 0, 'second code-file agent SIGINT exit code');
+      await waitFor(() => !hubCodes(ctx.hub).includes(code1), { timeoutMs: 8000, intervalMs: 100, label: 'hub to drop the second code-file tunnel' });
+      ctx.expectedAgents = hubStats(ctx.hub).agents;
+    });
+
+    await testCase('14 relay-code-file: invalid pre-existing content is regenerated and overwritten', async () => {
+      const codeFile = path.join(ctx.tmpDir, 'relay-code-invalid.txt');
+      const invalid = 'bad code!\n';
+      fs.writeFileSync(codeFile, invalid, 'utf8');
+      assert(!/^[A-Za-z0-9_-]{6,32}$/.test(invalid.trim()), 'precondition: the seeded code is invalid');
+
+      ctx.expectedAgents = 2;
+      const agent = await startAgent({
+        ctx,
+        label: 'codefile-invalid',
+        relayPort: ctx.relay.port,
+        relayCodeFile: codeFile,
+        fsRootDir: path.join(ctx.tmpDir, 'fs-codefile-invalid'),
+        noScreen: true,
+      });
+      const code = agent.relayCode;
+      assertMatch(code, /^[A-Za-z0-9_-]{6,32}$/, 'regenerated code format');
+      assert(code !== 'bad code!', 'the Agent must not adopt the invalid code');
+      assertEqual(fs.readFileSync(codeFile, 'utf8').trim(), code, 'invalid file content must be overwritten');
+      assertIncludes(hubCodes(ctx.hub), code, 'hub must register the regenerated code');
+      assertIncludes(tailFile(agent.agentLog, 8000), `[relay] code: ${code}`, 'log prints the regenerated code');
+
+      assertEqual(await stopAgent(agent), 0, 'invalid-code agent SIGINT exit code');
+      await waitFor(() => !hubCodes(ctx.hub).includes(code), { timeoutMs: 8000, intervalMs: 100, label: 'hub to drop the invalid-code tunnel' });
+      ctx.expectedAgents = hubStats(ctx.hub).agents;
+    });
+
+    await testCase('15 relay-code-file: explicit --relay-code wins and is written back to the file', async () => {
+      const codeFile = path.join(ctx.tmpDir, 'relay-code-explicit.txt');
+      fs.writeFileSync(codeFile, 'OLDC0DE\n', 'utf8');
+      const fixed = 'FIXEDCODE1';
+
+      ctx.expectedAgents = 2;
+      const agent = await startAgent({
+        ctx,
+        label: 'codefile-explicit',
+        relayPort: ctx.relay.port,
+        relayCode: fixed,
+        relayCodeFile: codeFile,
+        fsRootDir: path.join(ctx.tmpDir, 'fs-codefile-explicit'),
+        noScreen: true,
+      });
+      assertEqual(agent.relayCode, fixed, 'explicit --relay-code must take priority');
+      assertEqual(fs.readFileSync(codeFile, 'utf8').trim(), fixed, 'explicit code must be written back to the file');
+      assertIncludes(hubCodes(ctx.hub), fixed, 'hub must register the explicit code');
+      assert(!hubCodes(ctx.hub).includes('OLDC0DE'), 'the stale file code must not be registered');
+      const log = tailFile(agent.agentLog, 8000);
+      assertIncludes(log, `[relay] code: ${fixed}`, 'log prints the explicit code');
+
+      assertEqual(await stopAgent(agent), 0, 'explicit-code agent SIGINT exit code');
+      await waitFor(() => !hubCodes(ctx.hub).includes(fixed), { timeoutMs: 8000, intervalMs: 100, label: 'hub to drop the explicit-code tunnel' });
+      ctx.expectedAgents = hubStats(ctx.hub).agents;
+    });
+
+    await testCase('16 cleanup: stats back to zero, no residue', async () => {
       for (const client of ctx.clients) {
         if (!client.closed) await client.close();
       }
-      await stopAgent(ctx.linuxAgent);
+      // Stop every Agent this suite started (a failed earlier case must not
+      // leave a tunnel behind and make the cleanup assertions meaningless).
+      for (const agent of [...ctx.agents].reverse()) {
+        await stopAgent(agent);
+      }
       await waitFor(() => hubStats(ctx.hub).agents === 0 && hubStats(ctx.hub).clients === 0, {
-        timeoutMs: 8000,
+        timeoutMs: 10000,
         intervalMs: 100,
         label: 'relay hub stats to return to {agents:0, clients:0}',
       });

@@ -5,10 +5,14 @@ rem  Double-click this file to start the agent on this PC.
 rem  The file must stay PURE ASCII: cmd.exe uses the OEM code page for console
 rem  output, so non-ASCII text would be garbled. Chinese docs: README.zh.md.
 rem
-rem  Optional cross-NAT relay: put the Harness address (for example
-rem  https://your-harness.example.com) on the first line of relay.txt next to
-rem  this file. The launcher then appends --relay <address> to the agent.
-rem  See README.zh.md section 8.
+rem  Optional cross-NAT relay: put the Harness address on the first line of
+rem  relay.txt next to this file. The launcher then appends --relay <address>
+rem  and --relay-code-file relay-code.txt to the agent, so the access code is
+rem  persisted and stays the same after a restart.
+rem
+rem  This file is the console launcher. For a native Windows GUI (recommended)
+rem  double-click start-agent-gui.bat instead; both start the same agent.
+rem  See README.zh.md section 3 (GUI) and section 9 (relay).
 rem ===========================================================================
 setlocal EnableExtensions
 cd /d "%~dp0"
@@ -81,6 +85,8 @@ if not defined RELAY_URL goto :relay_missing
 echo       Relay server: "%RELAY_URL%"
 echo       The agent will connect out to this Harness. In the panel use the
 echo       "Relay" mode with the access code printed in the agent log below.
+echo       The access code is saved in "%~dp0relay-code.txt" and stays the
+echo       same after a restart, so a saved panel host keeps working.
 echo.
 goto :relay_after
 
@@ -88,8 +94,10 @@ goto :relay_after
 set "RELAY_URL="
 echo       Not configured. If the Harness is NOT on this LAN, write its address
 echo       on the first line of "%~dp0relay.txt", for example:
-echo         https://your-harness.example.com
+echo         https://YOUR-HARNESS-ADDRESS
+echo       (the panel button "Copy relay.txt" gives your current Harness origin)
 echo       Then run start-agent.bat again. LAN direct access works without it.
+echo       Tip: start-agent-gui.bat edits these settings in a native window.
 echo.
 
 :relay_after
@@ -109,21 +117,21 @@ echo.
 if defined RELAY_URL goto :connect_relay_ready
 echo    B. Different networks - relay: NOT configured.
 echo       To enable it, write the Harness address into "%~dp0relay.txt" and run
-echo       start-agent.bat again (see [3/4] above and README section 8).
+echo       start-agent.bat again (see [3/4] above and README section 9).
 echo.
 goto :connect_relay_done
 
 :connect_relay_ready
 echo    B. Different networks - relay via "%RELAY_URL%":
 echo       1. Wait for the agent log below to print "[relay] connected" and the
-echo          access code.
+echo          access code (also saved in relay-code.txt, unchanged after restart).
 echo       2. In the panel add a host in "Relay" mode: access code + password.
-echo       3. The access code changes on every start unless --relay-code is
-echo          given; no router port forwarding is needed.
+echo       3. No router port forwarding is needed.
 
 :connect_relay_done
 echo.
 echo  Notes:
+echo    - GUI: double-click start-agent-gui.bat for a native window (recommended).
 echo    - Keep this window open while the panel is connected.
 echo    - Direct mode: if Windows Firewall asks, click "Allow access".
 echo      Private networks are enough; never expose port 38080 to the Internet.
@@ -141,14 +149,14 @@ set "AGENT_EXIT=%ERRORLEVEL%"
 goto :agent_stopped
 
 :run_with_relay
-"%NODE_CMD%" "%~dp0..\remote-agent.mjs" --port 38080 --bind 0.0.0.0 --fs-root "%USERPROFILE%" --password-file "%~dp0agent-password.txt" --relay "%RELAY_URL%"
+"%NODE_CMD%" "%~dp0..\remote-agent.mjs" --port 38080 --bind 0.0.0.0 --fs-root "%USERPROFILE%" --password-file "%~dp0agent-password.txt" --relay "%RELAY_URL%" --relay-code-file "%~dp0relay-code.txt"
 set "AGENT_EXIT=%ERRORLEVEL%"
 
 :agent_stopped
 echo.
 echo Agent stopped, exit code %AGENT_EXIT%.
 if not "%AGENT_EXIT%"=="0" echo If it failed, check: netstat -ano and look for port 38080, or read the error above.
-if defined RELAY_URL echo If the relay failed, look for "[relay] connect failed" above and check relay.txt.
+if defined RELAY_URL echo If the relay failed, look for "[relay] connect failed" above and check relay.txt / relay-code.txt.
 echo.
 pause
 exit /b %AGENT_EXIT%

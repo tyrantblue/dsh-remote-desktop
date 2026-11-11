@@ -73,25 +73,26 @@ Windows Agent 主动出站 wss → Harness `/api/auth/remote-desktop/relay/agent
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/tyrantblue/dsh-remote-desktop/main/agent/windows/install.ps1 | iex"
 ```
 
-脚本会：从 GitHub 下载最新被控端 zip → 解压到 `%USERPROFILE%\dsh-remote-desktop` → 保留已生成的密码与便携 Node → 启动 `start-agent.bat`。之后每次启动只需双击桌面/目录里的 `start-agent.bat`。
+脚本会：从 GitHub 下载最新被控端 zip → 解压到 `%USERPROFILE%\dsh-remote-desktop` → 保留已生成的密码、`relay.txt`、`relay-code.txt` 与便携 Node → 启动原生 GUI（`start-agent-gui.bat`）。之后每次启动只需双击该 GUI 启动器；也保留 `start-agent.bat` 控制台方式。
 
 其他安装方式（任选其一）：
-- 打开 [Releases](https://github.com/tyrantblue/dsh-remote-desktop/releases) 下载 `dsh-remote-desktop-windows.zip`，解压后双击 `agent\windows\start-agent.bat`；
-- 已装 git：`git clone https://github.com/tyrantblue/dsh-remote-desktop.git` 后双击 `agent\windows\start-agent.bat`。
+- 打开 [Releases](https://github.com/tyrantblue/dsh-remote-desktop/releases) 下载 `dsh-remote-desktop-windows.zip`，解压后双击 `agent\windows\start-agent-gui.bat`（GUI）或 `start-agent.bat`（控制台）；
+- 已装 git：`git clone https://github.com/tyrantblue/dsh-remote-desktop.git` 后双击 `agent\windows\start-agent-gui.bat`。
 
-启动后：
+启动后（GUI 或控制台）：
 1. 首次运行会自动下载便携版 Node.js 到 `agent\windows\node\`（无需安装 Node，不用管理员权限；离线时按提示手动放好 `node\node.exe`）。
-2. 自动生成 `agent-password.txt` 随机密码，并打印本机 IPv4 与连接方式。
+2. 自动生成 `agent-password.txt` 随机密码；GUI 里可直接复制/重新生成，控制台模式会打印本机 IPv4。
 3. Windows 防火墙弹窗时选择「允许」（专用网络即可）；端口默认 38080。
-4. 面板里添加主机：地址 `被控机IP:38080`，密码见 `agent-password.txt`。
+4. 局域网：面板添加主机选「直连」，地址 `被控机IP:38080`，密码见 `agent-password.txt`。
+5. 跨 NAT：GUI 的 Relay server 填 Harness 地址（= 面板「复制 relay.txt」的内容），启动后把显示的接入码 + 密码填进面板「中继」主机；接入码保存在 `relay-code.txt`，重启不变。
 
 > 该窗口保持打开即被控中；`Ctrl+C` 停止（也可运行 `stop-agent.bat` 兜底）。
 > 必须在**已登录且未锁屏**的交互式桌面里运行：Windows 的锁屏/UAC 安全桌面无法被控制（系统安全边界，VNC/向日葵同样如此）。
 
 **不在同一局域网（跨 NAT / 公网）时用中继**（推荐，家用宽带/公司网都可用，不需要公网 IP）：
 
-1. 在 `agent\windows\` 下新建 `relay.txt`，内容一行：`https://dsh.tyrantblue.xyz`（面板「添加主机 → 中继」里有「复制 relay.txt」按钮，复制出来的就是这个地址）；
-2. 重新启动 `start-agent.bat`，控制台会出现 `[relay] connected ... 接入码: XXXXXXXXXX`（接入码每次启动随机；可用 `--relay-code` 固定）；
+1. 在 `agent\windows\` 下新建 `relay.txt`，内容一行：**你打开面板用的 Harness 地址**（例如 `https://<your-harness>`；面板「添加主机 → 中继」里的「复制 relay.txt」按钮复制出来的就是这个 origin，直接粘贴即可）；
+2. 重新启动被控端（推荐双击 `start-agent-gui.bat`；GUI 里可填 Relay server 并点 Start，或 `start-agent.bat` 控制台）。首次连接会生成接入码并保存到 `agent\windows\relay-code.txt`，GUI 状态区/控制台显示接入码；**之后重启接入码不变**（删除该文件或 GUI 里 Regenerate 才会换码，也可用 `--relay-code` 指定固定码），所以面板里保存的中继主机无需修改；
 3. 面板刷新页面 →「添加主机」→ 连接方式选「中继（跨 NAT）」→ 填接入码 + 密码 → 连接。
 
 ### 2. Linux/X11 被控机（保留路径，也是 E2E 环境）
@@ -152,9 +153,10 @@ bash scripts/demo-stop.sh      # 停止
 - **E2E：27/27 通过**（`bash test/run.sh`，约 17 秒，退出码 0）：
   - 01–22 Linux/X11：HTTP 鉴权/限流/CORS/文件越界、WS 握手与 hello 顺序、屏幕 keyframe 与独立 `xwd` 逐像素比对、增量瓦片、`screen.refresh`、鼠标（xev MotionNotify/Button）、键盘（keycode 38 / Shift state 0x1 / releaseAll 防卡键）、真实字符输入到 xterm、文本注入、shell、双客户端并发、SIGINT/端口/子进程/Xvfb 清理；
   - 23–27 **Windows 后端（fake helper）**：`platform=win32` 与 `screen=800x600`（来自 helper hello）、`encoding:"jpeg"` 全帧（header 字段、无 tiles、payloadLen、FFD8…FFD9、与 fixture 字节相等、seq 递增）、mouse/wheel/key+mods/Unicode text/releaseAll **逐字段转发到 helper 日志**、helper 崩溃/坏 JSON/抓帧超时后 Agent 存活并以 `error no_screen` 上报、SIGINT 后 Agent 与 helper 零残留。
-- **中继 E2E：13/13 通过**（`node test/relay.mjs`，约 4 秒）：`/info` 契约、真实 Agent 出站注册、经中继 auth/info、文件 upload/list/download 字节一致、WS hello/welcome + tiles keyframe（解码并与 `xwd` 参考比对）、输入、shell、未知 code（404 `relay_unknown_code`）、离线（503 `relay_offline`）、错误 token（1011）、心跳 ping→pong、崩溃/重连、win32 fake-helper JPEG、清理归零。
-- **公网中继实测**（本机 Linux Agent → `wss://dsh.tyrantblue.xyz`，浏览器走公网 HTTPS/WSS）：10/10 通过——wss 握手/注册、`/info`、auth、`/api/info`、文件上传下载、WS welcome、tiles 帧、shell；另有 stub 的文本/二进制双向帧、Cloudflare 下 6/6 通过。
-- **Windows 静态校验**（`node test/static-checks.mjs`，4 PASS / 0 FAIL / 0 SKIP）：JPEG fixture 可解码；`agent/windows/capture-input.ps1` 经 PowerShell 7.4.6 Parser 语法校验；内联 C# 经 `--dump-csharp` 导出后用 Mono `mcs` 编译通过；PS 纯 ASCII。另有 helper 自身的 JSON Lines 协议测试（mock C#）25/25，键位扫描码表覆盖 102 个必需 code 全命中。
+- **中继 E2E：16/16 通过**（`node test/relay.mjs`，约 5 秒）：`/info` 契约、真实 Agent 出站注册、经中继 auth/info、文件 upload/list/download 字节一致、WS hello/welcome + tiles keyframe（解码并与 `xwd` 参考比对）、输入、shell、未知 code（404 `relay_unknown_code`）、离线（503 `relay_offline`）、错误 token（1011）、心跳 ping→pong、崩溃/重连、win32 fake-helper JPEG、清理归零。
+- **公网中继实测**（本机 Linux Agent 出站到本部署的公网 Harness，浏览器走公网 HTTPS/WSS）：10/10 通过——wss 握手/注册、`/info`、auth、`/api/info`、文件上传下载、WS welcome、tiles 帧、shell；另有 stub 的文本/二进制双向帧、Cloudflare 下 6/6 通过。
+- **Windows 静态校验**（`node test/static-checks.mjs`，15 PASS / 0 FAIL / 0 SKIP）：JPEG fixture 可解码；`capture-input.ps1`/`gui.ps1`/`install.ps1` 经 PowerShell 7.4.6 Parser 语法校验；内联 C#（helper 与 GUI log pump）经 `--dump-csharp` 导出后用 Mono `mcs` 编译通过；PS 纯 ASCII；`start-agent-gui.bat` ASCII+CRLF；install.ps1 保留 relay-code.txt 且优先启动 GUI；无硬编码 Harness 域名。另有 helper 协议测试（mock C#）25/25、GUI 配置/日志解析逻辑单测 21/21，键位扫描码表覆盖 102 个必需 code 全命中。
+- **公网持久接入码实测**：真实 Agent 出站 `wss://` 本部署，`--relay-code-file` 首次生成写入、重启后 code 不变、面板用旧 code 仍能 auth/info（6/6）。
 - **真实画面演示（`bash demo/run.sh`）**：Xvfb + 真 xterm + bash + Agent，客户端经 Agent 键盘注入逐字键入命令，取 `screen.refresh` 的全量帧解码为 RGBA 后写 PNG：`demo/screenshot.png`。
 - **Harness 侧**：bundle 安装 `application: applied`；客户端模块 `/plugins/??@local/remote-desktop/client.js&rev=…` 返回 200；live Client 注册表里 `sidebar.panellist` 有 `remote-desktop`（order 5），`main` 有 key `remote-desktop`（active），页面无刷新即已热加载。
 - **X11 层**：`getImage` 像素与 `xwd` 一致；XTEST 注入经 `xev` 验证（按键 keycode、Shift 状态、鼠标按键）；Xauthority 的 6 种场景（正确/缺失/错误 cookie、wildcard、`~/.Xauthority`、TCP+auth）实测符合预期。

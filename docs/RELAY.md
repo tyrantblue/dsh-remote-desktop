@@ -93,7 +93,9 @@ Agent 用**全局 WebSocket**（Node ≥ 22，Windows 便携版满足；wss 由 
 
 ## 3. Agent 侧实现要求（`agent/lib/relay-client.mjs`）
 
-- CLI：`--relay <base-url>`（如 `https://dsh.tyrantblue.xyz`，或带路径的完整地址）、`--relay-code <CODE>`（缺省自动生成 10 位 `[A-Z0-9]`，启动时打印）。
+- CLI：`--relay <base-url>`（打开控制端面板的 Harness 地址，如 `https://<your-harness>`；也可带反向代理子路径）、`--relay-code <CODE>`、`--relay-code-file <path>`。
+  - 只给固定 code 用 `--relay-code`；想让它跨重启保持不变用 `--relay-code-file`：文件不存在则生成 10 位 `[A-Z0-9]` 并写入（0600），已存在则复用（非法/空则重生成覆盖）；显式 `--relay-code` 优先并写回文件。
+  - Windows 启动器/GUI 默认传 `--relay-code-file "agent\windows\relay-code.txt"`，所以**面板保存的接入码在重启后继续有效**；删除该文件（或 GUI 里 Regenerate）才会换码。
 - 启动后先监听本地 HTTP/WS 端口，再连接中继；中继失败**不得**影响本地直连模式，按 1s/2s/4s/8s/16s/30s 退避重连，并打印清晰状态：
   - 成功：`[relay] connected ... 接入码: ABC123DEF4`
   - 失败：`[relay] connect failed: ... (retry in 4s)`
@@ -121,4 +123,4 @@ Agent 用**全局 WebSocket**（Node ≥ 22，Windows 便携版满足；wss 由 
   - `WS /api/auth/remote-desktop/relay/ws?code=TESTCODE&token=...`：hello/welcome、screen.start 收到帧（Linux tiles / win32 fake helper JPEG 各一次）、输入、shell；
   - 错误 code → HTTP 404 / WS 拒绝；Agent 断开后 HTTP 503、重连后恢复；隧道 ping/pong。
 - 测试不得依赖 Harness 进程；总耗时 < 20s。
-- 部署后人工验证：本机 Agent 连 `wss://dsh.tyrantblue.xyz/...`，用公网 `https://dsh.tyrantblue.xyz/...` 作为浏览器路径（Cloudflare 已开启 WebSocket）。
+- 部署后人工验证：本机 Agent 连 `wss://<your-harness>/...`，用公网 `https://<your-harness>/...` 作为浏览器路径（反向代理需放行 WebSocket）。

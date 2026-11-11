@@ -39,6 +39,11 @@ const BACKPRESSURE_BYTES = 4 * 1024 * 1024;
 const STOP_CLOSE_TIMEOUT_MS = 1500;
 
 const CODE_RE = /^[A-Za-z0-9_-]{6,32}$/;
+
+/** True when `value` is a valid relay access code (6-32 chars A-Z a-z 0-9 _ -). */
+export function isValidRelayCode(value) {
+  return typeof value === 'string' && CODE_RE.test(value);
+}
 const CODE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
 // Headers the relay host is allowed to forward to the agent (RELAY.md §2.3).
@@ -98,7 +103,7 @@ export function buildAgentUrl(relayUrl, code, relayToken = null) {
 function normalizeCode(input) {
   if (input === undefined || input === null || input === '') return generateRelayCode();
   const code = String(input);
-  if (!CODE_RE.test(code)) {
+  if (!isValidRelayCode(code)) {
     throw new Error(`invalid relay code: ${JSON.stringify(code)} (6-32 characters of A-Z a-z 0-9 _ -)`);
   }
   return code;
@@ -483,15 +488,18 @@ export class RelayClient {
     this._reconnectAttempt = 0;
     this._allowReconnect = true;
     const info = this._agentIdentity();
-    this._sendText({ t: 'relay.hello', agent: info, code: this.code });
-    this._startHeartbeat();
     let host = this.agentUrl;
     try {
       host = new URL(this.agentUrl).host;
     } catch {
       /* ignore */
     }
+    // Log before relay.hello: the host marks the tunnel registered when it
+    // receives hello, and a synchronous log sink lets callers (and their logs)
+    // observe "connected" first.
     this._log(`[relay] connected ${host} 接入码: ${this.code}`);
+    this._sendText({ t: 'relay.hello', agent: info, code: this.code });
+    this._startHeartbeat();
   }
 
   _handleRelayClose(message) {

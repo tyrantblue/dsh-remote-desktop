@@ -63,6 +63,10 @@ window.__ModuleLoader__.load({
 			'host.connection': 'Connection',
 			'host.copyRelayFile': 'Copy relay.txt',
 			'host.copyCredentials': 'Copy code + password',
+			'host.copyCode': 'Copy access code',
+			'host.codeSavedTooltip': 'Saved — change it in Edit.',
+			'host.codeSavedHint': 'The access code is remembered in this browser. If the controlled PC uses relay-code.txt, the code stays the same after a restart, so you do not need to re-enter it; if the code was reset, click Edit to update it.',
+			'host.codeSavedCardHint': 'The access code is saved in this browser. If the controlled PC resets it, click Edit to update it.',
 			'host.password': 'Password',
 			'host.passwordHint': 'Stored only in this browser (localStorage) and sent to the agent for authentication.',
 			'host.namePlaceholder': 'e.g. Office PC',
@@ -233,6 +237,10 @@ window.__ModuleLoader__.load({
 			'host.connection': '连接方式',
 			'host.copyRelayFile': '复制 relay.txt',
 			'host.copyCredentials': '复制接入码 + 密码',
+			'host.copyCode': '复制接入码',
+			'host.codeSavedTooltip': '已保存，可在编辑中修改。',
+			'host.codeSavedHint': '接入码会被本机记住。若被控端使用 relay-code.txt，重启后接入码保持不变，无需重新填写；若接入码被重置，点「编辑」更新即可。',
+			'host.codeSavedCardHint': '接入码已保存在本机。若被控端重置了接入码，点「编辑」更新即可。',
 			'host.password': '密码',
 			'host.passwordHint': '仅保存在本机浏览器 localStorage 中，并发送给 Agent 用于鉴权。',
 			'host.namePlaceholder': '例如：办公室电脑',
@@ -1847,7 +1855,7 @@ window.__ModuleLoader__.load({
 							'div',
 							{ className: 'rdx-host-addr' },
 							host.mode === 'relay'
-								? h('span', { className: 'rdx-host-addr-line' }, h('span', { className: 'rdx-badge' }, t('host.relayBadge')), h('span', { className: 'rdx-host-code' }, host.code))
+								? h('span', { className: 'rdx-host-addr-line' }, h('span', { className: 'rdx-badge' }, t('host.relayBadge')), h('span', { className: 'rdx-host-code', title: t('host.codeSavedTooltip') }, host.code))
 								: h('span', { className: 'rdx-host-addr-line' }, host.address),
 						),
 					),
@@ -1919,6 +1927,7 @@ window.__ModuleLoader__.load({
 			const [copyFailed, setCopyFailed] = useState(false);
 			const nameRef = useRef(null);
 			const origin = safePageOrigin();
+			const savedCode = initialHost && initialHost.code ? initialHost.code : '';
 			useEffect(function focusFirstField() {
 				if (nameRef.current) nameRef.current.focus();
 			}, []);
@@ -1951,6 +1960,12 @@ window.__ModuleLoader__.load({
 				const trimmedCode = String(code || '').trim();
 				const text = t('host.code') + ': ' + trimmedCode + '\n' + t('host.password') + ': ' + String(password || '');
 				copy('credentials', text);
+			};
+			const copyCode = function copyCode() {
+				// Editing copies the stored code; a new host copies what was typed.
+				const value = savedCode || String(code || '').trim();
+				if (!value) return;
+				copy('code', value);
 			};
 			const submit = function submit(event) {
 				if (event) event.preventDefault();
@@ -2022,11 +2037,13 @@ window.__ModuleLoader__.load({
 						placeholder: t('host.codePlaceholder'),
 						spellCheck: false,
 						autoComplete: 'off',
+						title: t('host.codeSavedTooltip'),
 						onChange: function change(event) {
 							setCode(event.target.value);
 						},
 					}),
 					h('span', { className: 'rdx-hint' }, t('host.codeHint')),
+					h('span', { className: 'rdx-hint' }, t('host.codeSavedHint')),
 				),
 				h('div', { className: 'rdx-note' }, t('host.relayHint')),
 				origin ? h('div', { className: 'rdx-hint' }, t('host.relayVia', { origin: origin })) : null,
@@ -2037,6 +2054,11 @@ window.__ModuleLoader__.load({
 						Btn,
 						{ size: 'sm', icon: 'copy', onClick: copyRelayFile },
 						copiedField === 'relayFile' ? t('common.copied') : t('host.copyRelayFile'),
+					),
+					h(
+						Btn,
+						{ size: 'sm', icon: 'copy', onClick: copyCode, disabled: !savedCode && !String(code || '').trim() },
+						copiedField === 'code' ? t('common.copied') : t('host.copyCode'),
 					),
 					h(
 						Btn,
@@ -2167,6 +2189,27 @@ window.__ModuleLoader__.load({
 			const connecting = status === 'connecting';
 			const showRetry = status === 'error' || status === 'closed';
 			const errorText = props.notice ? describeError(t, props.notice.error) : '';
+			const [copied, setCopied] = useState(false);
+			const [copyFailed, setCopyFailed] = useState(false);
+			useEffect(function resetCopiedState() {
+				if (!copied) return undefined;
+				const timer = setTimeout(function clearCopyLabel() {
+					setCopied(false);
+				}, 1600);
+				return function cleanup() {
+					clearTimeout(timer);
+				};
+			}, [copied]);
+			const copyCode = async function copyCode() {
+				if (!host.code) return;
+				setCopyFailed(false);
+				try {
+					await copyClipboardText(host.code);
+					setCopied(true);
+				} catch (failure) {
+					setCopyFailed(true);
+				}
+			};
 			return h(
 				'div',
 				{ className: 'rdx-main-empty' },
@@ -2183,11 +2226,20 @@ window.__ModuleLoader__.load({
 									'span',
 									{ className: 'rdx-addr-line' },
 									h('span', { className: 'rdx-badge' }, t('host.relayBadge')),
-									h('span', { className: 'rdx-addr-code' }, host.code),
+									h('span', { className: 'rdx-addr-code', title: t('host.codeSavedTooltip') }, host.code),
 								)
 							: h('span', { className: 'rdx-addr-line' }, host.address),
 						host.mode === 'relay' ? h('div', { className: 'rdx-hint' }, t('host.relayHint')) : null,
+						host.mode === 'relay' ? h('div', { className: 'rdx-hint' }, t('host.codeSavedCardHint')) : null,
 					),
+					host.mode === 'relay'
+						? h(
+								'div',
+								{ className: 'rdx-row' },
+								h(Btn, { size: 'sm', icon: 'copy', onClick: copyCode }, copied ? t('common.copied') : t('host.copyCode')),
+								copyFailed ? h('span', { className: 'rdx-error-text' }, t('common.copyFailed')) : null,
+							)
+						: null,
 					h('div', { className: 'rdx-row' }, h(StatusDot, { state: status }), h('span', { className: 'rdx-muted' }, t('state.' + status))),
 					h('div', { className: 'rdx-row' }, h(Icon, { name: 'key', size: 14 }), h('span', { className: 'rdx-muted' }, host.password ? t('host.passwordSaved') : t('host.passwordMissing'))),
 					errorText ? h('div', { className: 'rdx-error-text' }, errorText) : null,

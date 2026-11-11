@@ -7,3 +7,5 @@ test/.tmp/
 demo/.demo.pids
 dist/
 agent/windows/relay.txt
+agent/windows/relay-code.txt
+agent/windows/agent-password.txt

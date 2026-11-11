@@ -22,7 +22,7 @@ import { AuthService, HttpApi } from './lib/http.mjs';
 import { FileService } from './lib/files.mjs';
 import { ShellSession } from './lib/shell.mjs';
 import { createBackend } from './lib/backend.mjs';
-import { RelayClient, generateRelayCode } from './lib/relay-client.mjs';
+import { RelayClient, generateRelayCode, isValidRelayCode } from './lib/relay-client.mjs';
 
 const PROTOCOL_VERSION = 1;
 const AGENT_VERSION = '1.0.0';
@@ -70,6 +70,7 @@ Options:
   --insecure             no-password mode (testing only; binds 127.0.0.1 unless --bind given)
   --relay <base-url>     connect out to a Harness relay (https://host[/path] or wss://host)
   --relay-code <CODE>    relay access code, 6-32 chars [A-Za-z0-9_-] (default: generated)
+  --relay-code-file <path>  persist/reuse the relay access code in a file (0600)
   --quiet                suppress informational output
   -h, --help             show this help
 
@@ -98,6 +99,7 @@ function parseArgs(argv) {
     quiet: false,
     relay: null,
     relayCode: null,
+    relayCodeFile: null,
     help: false,
   };
 
@@ -111,6 +113,7 @@ function parseArgs(argv) {
     '--token-ttl-hours',
     '--relay',
     '--relay-code',
+    '--relay-code-file',
   ]);
   const booleanFlags = new Set([
     '--no-screen',
@@ -211,10 +214,16 @@ function parseArgs(argv) {
         opts.relay = value;
         break;
       case '--relay-code':
-        if (!/^[A-Za-z0-9_-]{6,32}$/.test(value)) {
+        if (!isValidRelayCode(value)) {
           throw new Error(`invalid --relay-code value: ${value} (6-32 characters of A-Z a-z 0-9 _ -)`);
         }
         opts.relayCode = value;
+        break;
+      case '--relay-code-file':
+        if (value.length === 0) {
+          throw new Error('--relay-code-file requires a non-empty path');
+        }
+        opts.relayCodeFile = value;
         break;
       default:
         break;
@@ -242,6 +251,47 @@ function normalizePlatformName(platform) {
 // `RDA_HELPER_CMD` is the documented testing hook that makes a non-Windows
 // host exercise the win32 backend; on a real Windows host process.platform is
 // already 'win32'.
+function resolveRelayCode(opts) {
+  const explicit = opts.relayCode || null;
+  if (!opts.relayCodeFile) {
+    return { code: explicit || generateRelayCode(), suffix: null };
+  }
+
+  const codeFile = path.resolve(expandHome(opts.relayCodeFile));
+  const writeCode = (code) => {
+    try {
+      // UTF-8, no BOM, one trailing newline. `mode` only applies on creation,
+      // so an existing file keeps its own permissions.
+      fs.writeFileSync(codeFile, `${code}\n`, { encoding: 'utf8', mode: 0o600 });
+      return true;
+    } catch (err) {
+      logWarn(`[relay] cannot write relay code file ${codeFile}: ${err && err.message ? err.message : err}`);
+      return false;
+    }
+  };
+
+  if (explicit) {
+    const saved = writeCode(explicit);
+    return { code: explicit, suffix: saved ? `(saved to ${codeFile})` : null };
+  }
+
+  let existing = null;
+  try {
+    existing = fs.readFileSync(codeFile, 'utf8').replace(/^\uFEFF/, '').trim();
+  } catch (err) {
+    if (!err || err.code !== 'ENOENT') {
+      logWarn(`[relay] cannot read relay code file ${codeFile}: ${err && err.message ? err.message : err}`);
+    }
+  }
+  if (existing && isValidRelayCode(existing)) {
+    return { code: existing, suffix: `(persistent: ${codeFile})` };
+  }
+
+  const code = generateRelayCode();
+  const saved = writeCode(code);
+  return { code, suffix: saved ? `(saved to ${codeFile})` : null };
+}
+
 function detectPlatform() {
   const helperCommand = process.env.RDA_HELPER_CMD;
   if (typeof helperCommand === 'string' && helperCommand.trim() !== '') return 'win32';
@@ -1136,24 +1186,49 @@ async function main() {
 
   // ---- reverse relay (optional) ------------------------------------------
   if (opts.relay) {
-    const code = opts.relayCode || generateRelayCode();
     if (typeof WebSocket !== 'function') {
       logWarn('relay mode requires Node.js >= 22 (global WebSocket is not available); running local mode only');
     } else {
+      // Resolve (and, with --relay-code-file, persist) the access code. This
+      // only runs when relay mode is actually requested, so a bare
+      // --relay-code/--relay-code-file never creates a file.
+      const resolvedCode = resolveRelayCode(opts);
+      // Relay status lines are written synchronously: the operating console /
+      // log file must have them before the tunnel finishes registering, so a
+      // supervisor can read the access code as soon as the hub sees it.
+      const relayLog = quiet
+        ? () => {}
+        : (...args) => {
+            try {
+              fs.writeSync(1, `${args.map((value) => String(value)).join(' ')}\n`);
+            } catch {
+              /* ignore log write failures */
+            }
+          };
+      const relayWarn = quiet
+        ? () => {}
+        : (...args) => {
+            try {
+              fs.writeSync(2, `${args.map((value) => String(value)).join(' ')}\n`);
+            } catch {
+              /* ignore log write failures */
+            }
+          };
       try {
         relayClient = new RelayClient({
           relayUrl: opts.relay,
-          code,
+          code: resolvedCode.code,
           port: actualPort,
           host: '127.0.0.1',
           relayToken: process.env.REMOTE_AGENT_RELAY_TOKEN || null,
           platform,
-          log: quiet ? () => {} : (...args) => console.log(...args),
-          warn: quiet ? () => {} : (...args) => console.warn(...args),
+          log: relayLog,
+          warn: relayWarn,
         });
         if (!quiet) {
-          console.log(`[relay] code: ${relayClient.code} (在远程桌面面板选择“中继”，填入接入码+密码)`);
-          console.log(`[relay] server: ${opts.relay}`);
+          const suffix = resolvedCode.suffix ? ` ${resolvedCode.suffix}` : '';
+          relayLog(`[relay] code: ${relayClient.code}${suffix} (在远程桌面面板选择“中继”，填入接入码+密码)`);
+          relayLog(`[relay] server: ${opts.relay}`);
         }
         relayClient.start().catch((err) => {
           logWarn(`[relay] disabled: ${err && err.message ? err.message : err}`);
@@ -1163,8 +1238,8 @@ async function main() {
         logWarn(`[relay] disabled: ${err && err.message ? err.message : err}`);
       }
     }
-  } else if (opts.relayCode) {
-    logWarn('--relay-code ignored because --relay was not given');
+  } else if (opts.relayCode || opts.relayCodeFile) {
+    logWarn('--relay-code/--relay-code-file ignored because --relay was not given');
   }
 }
 

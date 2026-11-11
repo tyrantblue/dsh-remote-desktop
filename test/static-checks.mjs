@@ -42,6 +42,10 @@ const PS_HELPER = path.join(REPO_DIR, 'agent', 'windows', 'capture-input.ps1');
 const WINDOWS_DIR = path.join(REPO_DIR, 'agent', 'windows');
 const PWSH = process.env.PWSH || '/opt/pwsh/pwsh';
 const MCS = process.env.MCS || 'mcs';
+const GUI_PS = path.join(REPO_DIR, 'agent', 'windows', 'gui.ps1');
+const GUI_BAT = path.join(REPO_DIR, 'agent', 'windows', 'start-agent-gui.bat');
+const INSTALL_PS = path.join(REPO_DIR, 'agent', 'windows', 'install.ps1');
+const ROOT_README = path.join(REPO_DIR, 'README.md');
 
 const results = [];
 function record(status, name, detail = '') {
@@ -55,6 +59,181 @@ function toolVersion(command, args) {
   if (result.error) return { ok: false, error: result.error.message };
   const text = `${result.stdout || ''}${result.stderr || ''}`.trim().split('\n')[0];
   return { ok: result.status === 0, version: text, status: result.status };
+}
+
+function readFileOrNull(filePath) {
+  try {
+    return fs.readFileSync(filePath);
+  } catch {
+    return null;
+  }
+}
+
+function nonAsciiByteCount(buffer) {
+  let count = 0;
+  for (const byte of buffer) if (byte > 0x7f) count += 1;
+  return count;
+}
+
+/** PASS/FAIL ASCII check for one file. */
+function checkAscii(filePath, label) {
+  const bytes = readFileOrNull(filePath);
+  if (!bytes) {
+    record('SKIP', `${label} is pure ASCII`, `missing ${filePath}`);
+    return;
+  }
+  const count = nonAsciiByteCount(bytes);
+  if (count === 0) record('PASS', `${label} is pure ASCII (0 non-ASCII bytes)`);
+  else record('FAIL', `${label} is pure ASCII`, `${count} non-ASCII byte(s) in ${filePath}`);
+}
+
+/** PowerShell parser check via the real pwsh (SKIP when pwsh is unavailable). */
+function checkPwshParse(psPath, label) {
+  if (!fs.existsSync(PWSH)) {
+    record('SKIP', `${label} parses with pwsh`, `pwsh not available at ${PWSH}`);
+    return;
+  }
+  const escaped = psPath.replace(/'/g, "''");
+  const command =
+    `$tokens=$null; $errors=$null; ` +
+    `[System.Management.Automation.Language.Parser]::ParseFile('${escaped}',[ref]$tokens,[ref]$errors) | Out-Null; ` +
+    `if ($errors.Count -gt 0) { foreach ($e in $errors) { [Console]::Error.WriteLine($e.Message) }; exit 1 }; exit 0`;
+  const result = spawnSync(PWSH, ['-NoProfile', '-NonInteractive', '-Command', command], {
+    encoding: 'utf8',
+    timeout: 120000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const detail = `${(result.stdout || '').trim()} ${(result.stderr || '').trim()}`.trim();
+  if (result.error) record('SKIP', `${label} parses with pwsh`, `pwsh failed to run: ${result.error.message}`);
+  else if (result.status !== 0) record('FAIL', `${label} parses with pwsh`, detail || `exit ${result.status}`);
+  else {
+    const version = toolVersion(PWSH, ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.ToString()']);
+    record('PASS', `${label} parses with pwsh${version.ok ? ` (${version.version})` : ''}`);
+  }
+}
+
+/** Windows GUI scripts + launchers (win32-helper artifacts). Missing files SKIP. */
+function checkWindowsGuiArtifacts() {
+  // ---- gui.ps1 ---------------------------------------------------------
+  if (!fs.existsSync(GUI_PS)) {
+    record('SKIP', 'gui.ps1 exists', `missing ${GUI_PS} (win32-helper GUI not delivered yet)`);
+  } else {
+    record('PASS', 'gui.ps1 exists');
+    checkAscii(GUI_PS, 'gui.ps1');
+    checkPwshParse(GUI_PS, 'gui.ps1');
+    const text = fs.readFileSync(GUI_PS).toString('latin1');
+    const markers = [
+      ['Add-Type -AssemblyName System.Windows.Forms', /Add-Type\s+-AssemblyName\s+System\.Windows\.Forms/],
+      ['CreateNoWindow', /CreateNoWindow/],
+      ['--relay-code-file', /--relay-code-file/],
+      ['Start button/label', /\bStart\b/],
+      ['Stop button/label', /\bStop\b/],
+    ];
+    const missing = markers.filter(([, regex]) => !regex.test(text)).map(([name]) => name);
+    if (missing.length === 0) {
+      record('PASS', `gui.ps1 contains ${markers.map(([name]) => name).join(' + ')}`);
+    } else {
+      record('FAIL', 'gui.ps1 contains required markers', `missing: ${missing.join(', ')}`);
+    }
+  }
+
+  // ---- start-agent-gui.bat --------------------------------------------
+  if (!fs.existsSync(GUI_BAT)) {
+    record('SKIP', 'start-agent-gui.bat exists', `missing ${GUI_BAT} (win32-helper GUI not delivered yet)`);
+  } else {
+    record('PASS', 'start-agent-gui.bat exists');
+    checkAscii(GUI_BAT, 'start-agent-gui.bat');
+    const bytes = fs.readFileSync(GUI_BAT);
+    let loneLf = 0;
+    let loneCr = 0;
+    for (let i = 0; i < bytes.length; i += 1) {
+      if (bytes[i] === 0x0a && (i === 0 || bytes[i - 1] !== 0x0d)) loneLf += 1;
+      if (bytes[i] === 0x0d && (i + 1 >= bytes.length || bytes[i + 1] !== 0x0a)) loneCr += 1;
+    }
+    const hasNewlines = bytes.includes(0x0a);
+    if (hasNewlines && loneLf === 0 && loneCr === 0) {
+      record('PASS', 'start-agent-gui.bat uses CRLF line endings');
+    } else {
+      record('FAIL', 'start-agent-gui.bat uses CRLF line endings', `loneLF=${loneLf}, loneCR=${loneCr}, newlines=${hasNewlines}`);
+    }
+    const text = bytes.toString('latin1');
+    if (/gui\.ps1/i.test(text)) record('PASS', 'start-agent-gui.bat references gui.ps1');
+    else record('FAIL', 'start-agent-gui.bat references gui.ps1', 'no "gui.ps1" reference found');
+  }
+
+  // ---- install.ps1 ------------------------------------------------------
+  if (!fs.existsSync(INSTALL_PS)) {
+    record('SKIP', 'install.ps1 exists', `missing ${INSTALL_PS}`);
+  } else {
+    record('PASS', 'install.ps1 exists');
+    const text = fs.readFileSync(INSTALL_PS).toString('utf8');
+    const hasRelayCodeTxt = /relay-code\.txt/i.test(text);
+    const prefersGui = /(start-agent-gui|gui\.ps1)/i.test(text);
+    if (hasRelayCodeTxt && prefersGui) {
+      record('PASS', 'install.ps1 preserves relay-code.txt and prefers the GUI launcher');
+    } else {
+      record(
+        'FAIL',
+        'install.ps1 preserves relay-code.txt and prefers the GUI launcher',
+        `relay-code.txt=${hasRelayCodeTxt}, GUI reference=${prefersGui}`,
+      );
+    }
+  }
+}
+
+/**
+ * No hardcoded public Harness domain in the Windows scripts/docs.
+ * `dsh.tyrantblue.xyz` is never allowed; a bare `dsh.tyrantblue` is only
+ * tolerated inside a github.com URL (repository link).
+ */
+function checkNoHardcodedHarnessDomain() {
+  const targets = [];
+  const walk = (dir) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile()) targets.push(full);
+    }
+  };
+  walk(WINDOWS_DIR);
+  if (fs.existsSync(ROOT_README)) targets.push(ROOT_README);
+
+  const violations = [];
+  const githubTyranblueLinks = [];
+  for (const filePath of targets) {
+    let text;
+    try {
+      text = fs.readFileSync(filePath, 'utf8');
+    } catch {
+      continue;
+    }
+    const relative = path.relative(REPO_DIR, filePath);
+    text.split('\n').forEach((line, index) => {
+      if (line.includes('dsh.tyrantblue.xyz')) {
+        violations.push(`${relative}:${index + 1}: ${line.trim().slice(0, 160)}`);
+        return;
+      }
+      if (line.includes('dsh.tyrantblue')) {
+        if (/github\.com\/[^\s"'<>)]*tyrantblue/i.test(line)) githubTyranblueLinks.push(relative);
+        else violations.push(`${relative}:${index + 1}: ${line.trim().slice(0, 160)}`);
+      }
+    });
+  }
+  if (violations.length === 0) {
+    record(
+      'PASS',
+      `no hardcoded dsh.tyrantblue.xyz in agent/windows/* or README.md (${targets.length} files scanned)` +
+        (githubTyranblueLinks.length > 0 ? `; GitHub tyrantblue links allowed in ${new Set(githubTyranblueLinks).size} file(s)` : ''),
+    );
+  } else {
+    record('FAIL', 'no hardcoded Harness domain in Windows docs/scripts', violations.slice(0, 6).join(' | '));
+  }
 }
 
 async function main() {
@@ -169,6 +348,11 @@ async function main() {
         );
       }
     }
+    // ---- 4. Windows GUI / launcher static checks -------------------------
+    checkWindowsGuiArtifacts();
+
+    // ---- 5. No hardcoded public Harness domain ---------------------------
+    checkNoHardcodedHarnessDomain();
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

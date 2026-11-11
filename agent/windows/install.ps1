@@ -4,8 +4,9 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/tyrantblue/dsh-remote-desktop/main/agent/windows/install.ps1 | iex"
 #
 # It downloads the latest agent build from GitHub, extracts it under the install
-# directory, keeps an existing agent-password.txt / portable node\ folder, and then
-# starts start-agent.bat so the panel can connect.
+# directory, keeps the user data (agent-password.txt, relay.txt, relay-code.txt,
+# portable node\ folder), and then starts the native GUI (start-agent-gui.bat)
+# when available, otherwise start-agent.bat.
 #
 # This file must stay PURE ASCII (Windows PowerShell 5.1 reads it fine without BOM).
 [CmdletBinding()]
@@ -86,11 +87,17 @@ try {
         Copy-Item -LiteralPath $oldNode -Destination $keepNode -Recurse -Force
     }
     # relay.txt holds the Harness address used for cross-NAT relay connections;
-    # an upgrade must not force the user to look it up again.
+    # relay-code.txt holds the persistent relay access code. Neither must be
+    # lost on an upgrade (the panel stores the access code).
     $relayFile = Join-Path $targetWindows 'relay.txt'
     $keepRelay = $null
     if (Test-Path -LiteralPath $relayFile) {
         $keepRelay = Get-Content -LiteralPath $relayFile -Raw
+    }
+    $relayCodeFile = Join-Path $targetWindows 'relay-code.txt'
+    $keepRelayCode = $null
+    if (Test-Path -LiteralPath $relayCodeFile) {
+        $keepRelayCode = Get-Content -LiteralPath $relayCodeFile -Raw
     }
 
     if (Test-Path -LiteralPath $targetAgent) {
@@ -112,28 +119,45 @@ try {
         [System.IO.File]::WriteAllText($relayFile, $keepRelay, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
         Write-Step 'Kept the existing relay.txt.'
     }
+    if ($null -ne $keepRelayCode) {
+        [System.IO.File]::WriteAllText($relayCodeFile, $keepRelayCode, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+        Write-Step 'Kept the existing relay-code.txt (persistent access code).'
+    }
 
     $startBat = Join-Path $targetWindows 'start-agent.bat'
+    $guiBat = Join-Path $targetWindows 'start-agent-gui.bat'
+    $hasGui = Test-Path -LiteralPath $guiBat
     Write-Host ''
     Write-Host 'Installed:'
     Write-Host ('  agent:    ' + $targetAgent)
-    Write-Host ('  launcher: ' + $startBat)
+    if ($hasGui) {
+        Write-Host ('  GUI:      ' + $guiBat + '  (recommended)')
+        Write-Host ('  console:  ' + $startBat)
+    } else {
+        Write-Host ('  launcher: ' + $startBat)
+    }
     Write-Host ('  password: ' + (Join-Path $targetWindows 'agent-password.txt') + ' (created on first start)')
     Write-Host ''
+    Write-Host 'Kept across upgrades: agent-password.txt, relay.txt, relay-code.txt, node\'
+    Write-Host ''
     Write-Host 'Cross-NAT / relay (no public IP or router port forwarding needed):'
-    Write-Host ('  If the Harness is NOT on this LAN, create: ' + (Join-Path $targetWindows 'relay.txt'))
-    Write-Host '  and put the Harness address on its first line, for example:'
-    Write-Host '    https://your-harness.example.com'
-    Write-Host '  Then start the agent and add this host in the panel with "Relay" mode'
-    Write-Host '  (the agent prints the access code). LAN direct mode keeps working.'
+    Write-Host ('  If the Harness is NOT on this LAN, set the Harness address in: ' + (Join-Path $targetWindows 'relay.txt'))
+    Write-Host '  (or use the GUI). The access code is stored in relay-code.txt and stays'
+    Write-Host '  the same after a restart, so a host saved in the panel keeps working.'
+    Write-Host '  In the panel use "Relay" mode with that access code and the password.'
     Write-Host ''
     if ($NoStart) {
         Write-Host 'Start it with:'
-        Write-Host ('  "' + $startBat + '"')
+        if ($hasGui) { Write-Host ('  "' + $guiBat + '"  (GUI)') }
+        Write-Host ('  "' + $startBat + '"  (console)')
     } else {
         Write-Host 'Starting the agent. Allow it in the Windows Firewall prompt.'
-        Write-Host 'Add this PC in the DSH "Remote Desktop" panel with the printed IPv4 and password.'
-        Start-Process -FilePath $startBat
+        Write-Host 'Add this PC in the DSH "Remote Desktop" panel (LAN IP, or "Relay" mode).'
+        if ($hasGui) {
+            Start-Process -FilePath $guiBat
+        } else {
+            Start-Process -FilePath $startBat
+        }
     }
 }
 catch {
@@ -141,7 +165,8 @@ catch {
     Write-Host ''
     Write-Host 'Manual fallback: download the zip from'
     Write-Host ('  ' + $repo + '/releases')
-    Write-Host 'extract it, and double-click agent\windows\start-agent.bat.'
+    Write-Host 'extract it, and double-click agent\windows\start-agent-gui.bat (GUI)'
+    Write-Host 'or agent\windows\start-agent.bat (console).'
     exit 1
 }
 finally {
