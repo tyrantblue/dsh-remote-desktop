@@ -17,6 +17,9 @@
 import fs from 'node:fs';
 
 const fsp = fs.promises;
+
+// Windows paths are case-insensitive and may be written with either slash.
+const CASE_INSENSITIVE = process.platform === 'win32';
 import os from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
@@ -98,16 +101,23 @@ function wrapFsError(err, fallbackMessage) {
   return new FileError(code, fallbackMessage ? `${fallbackMessage}: ${detail}` : detail, { cause: err });
 }
 
+function comparablePath(value) {
+  const normalized = path.normalize(value);
+  return CASE_INSENSITIVE ? normalized.toLowerCase() : normalized;
+}
+
 function isInside(child, root) {
-  if (child === root) return true;
-  if (root === path.sep) return child.startsWith(path.sep);
-  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
-  return child.startsWith(prefix);
+  const normalizedChild = comparablePath(child);
+  const normalizedRoot = comparablePath(root);
+  if (normalizedChild === normalizedRoot) return true;
+  if (normalizedRoot.endsWith(path.sep)) return normalizedChild.startsWith(normalizedRoot);
+  return normalizedChild.startsWith(normalizedRoot + path.sep);
 }
 
 function expandTilde(input) {
   if (input === '~') return os.homedir();
-  if (input.startsWith('~/')) return path.join(os.homedir(), input.slice(2));
+  // Accept "~/..." on POSIX and "~\\..." / "~/" on Windows.
+  if (/^~[\\/]/.test(input)) return path.join(os.homedir(), input.slice(2));
   return input;
 }
 
@@ -331,7 +341,7 @@ export class FileService {
   async remove(p, recursive = false) {
     if (this.readOnly) throw new FileError('permission_denied', 'filesystem is read-only');
     const target = this.resolveSafe(p);
-    if (target === this.root) {
+    if (comparablePath(target) === comparablePath(this.root)) {
       throw new FileError('permission_denied', 'refusing to remove the filesystem root');
     }
 

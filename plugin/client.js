@@ -83,6 +83,7 @@ window.__ModuleLoader__.load({
 			'session.textUnavailable': 'This agent reports no text-injection capability; only ASCII may work.',
 			'session.decodeUnsupported': 'This browser cannot decode screen frames (DecompressionStream is missing). Use a current Chrome or Edge.',
 			'session.decodeFailed': 'A screen frame could not be decoded.',
+			'session.jpegUnsupported': 'This browser cannot decode JPEG screen frames.',
 
 			'toolbar.fps': 'FPS',
 			'toolbar.fpsOption': '{fps} fps',
@@ -93,6 +94,20 @@ window.__ModuleLoader__.load({
 			'toolbar.paste': 'Paste text',
 			'toolbar.disconnect': 'Disconnect',
 			'toolbar.close': 'Close',
+			'toolbar.quality': 'Quality',
+			'toolbar.qualityHint': 'JPEG quality. Only affects JPEG streaming; tile streaming ignores it.',
+			'toolbar.quality30': 'Low ({value})',
+			'toolbar.quality50': 'Medium ({value})',
+			'toolbar.quality65': 'High ({value})',
+			'toolbar.quality80': 'Ultra ({value})',
+			'toolbar.platform': 'Platform',
+			'toolbar.encoding': 'Encoding',
+			'toolbar.encodingJpeg': 'JPEG',
+			'toolbar.encodingTiles': 'Tiles',
+			'platform.win32': 'Windows',
+			'platform.linux': 'Linux',
+			'platform.darwin': 'macOS',
+			'platform.unknown': 'Unknown',
 
 			'error.source.connection': 'Connection',
 			'error.source.files': 'Files',
@@ -218,6 +233,7 @@ window.__ModuleLoader__.load({
 			'session.textUnavailable': '该 Agent 未上报文本注入能力，可能只支持 ASCII。',
 			'session.decodeUnsupported': '当前浏览器无法解码画面帧（缺少 DecompressionStream），请使用较新的 Chrome 或 Edge。',
 			'session.decodeFailed': '有一帧画面解码失败。',
+			'session.jpegUnsupported': '当前浏览器无法解码 JPEG 画面帧。',
 
 			'toolbar.fps': '帧率',
 			'toolbar.fpsOption': '{fps} 帧/秒',
@@ -228,6 +244,20 @@ window.__ModuleLoader__.load({
 			'toolbar.paste': '粘贴文本',
 			'toolbar.disconnect': '断开',
 			'toolbar.close': '关闭',
+			'toolbar.quality': '画质',
+			'toolbar.qualityHint': 'JPEG 画质，仅对 JPEG 串流生效，瓦片串流不受影响。',
+			'toolbar.quality30': '低（{value}）',
+			'toolbar.quality50': '中（{value}）',
+			'toolbar.quality65': '高（{value}）',
+			'toolbar.quality80': '极高（{value}）',
+			'toolbar.platform': '平台',
+			'toolbar.encoding': '编码',
+			'toolbar.encodingJpeg': 'JPEG',
+			'toolbar.encodingTiles': '瓦片',
+			'platform.win32': 'Windows',
+			'platform.linux': 'Linux',
+			'platform.darwin': 'macOS',
+			'platform.unknown': '未知',
 
 			'error.source.connection': '连接',
 			'error.source.files': '文件',
@@ -311,6 +341,19 @@ window.__ModuleLoader__.load({
 		const ACTIVE_KEY = 'dsh.remoteDesktop.activeHost.v1';
 		const PROTOCOL_VERSION = 1;
 		const FPS_OPTIONS = [5, 10, 15, 24];
+		const DEFAULT_QUALITY = 65;
+		const QUALITY_OPTIONS = [30, 50, 65, 80];
+		const QUALITY_LABEL_KEYS = {
+			30: 'toolbar.quality30',
+			50: 'toolbar.quality50',
+			65: 'toolbar.quality65',
+			80: 'toolbar.quality80',
+		};
+		const PLATFORM_LABEL_KEYS = {
+			win32: 'platform.win32',
+			linux: 'platform.linux',
+			darwin: 'platform.darwin',
+		};
 		const MAX_RECONNECT = 5;
 		const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000];
 		const SHELL_SCROLLBACK_LIMIT = 5000;
@@ -412,16 +455,64 @@ window.__ModuleLoader__.load({
 			}
 		}
 
+		/** True for a Windows drive path (`C:\...` / `C:/...`) or a UNC path (`\\server\share`). */
+		function isWindowsPath(path) {
+			const value = String(path === undefined || path === null ? '' : path);
+			return /^[A-Za-z]:[\\/]/.test(value) || value.indexOf('\\\\') === 0;
+		}
+
+		/**
+		 * Join a directory and an entry name, keeping the platform's separator.
+		 * The agent returns absolute paths, so a Windows root or `C:\Users\me`
+		 * must stay a Windows path when the file drawer builds a child path.
+		 */
 		function joinPath(dir, name) {
-			const base = String(dir === undefined || dir === null ? '' : dir).replace(/\/+$/, '');
-			const leaf = String(name === undefined || name === null ? '' : name).replace(/^\/+/, '');
+			const rawBase = String(dir === undefined || dir === null ? '' : dir);
+			const rawLeaf = String(name === undefined || name === null ? '' : name);
+			if (isWindowsPath(rawBase)) {
+				const base = rawBase.replace(/[\\/]+$/, '');
+				const leaf = rawLeaf.replace(/^[\\/]+/, '');
+				if (!leaf) return rawBase || '\\';
+				return (base ? base + '\\' : '\\') + leaf;
+			}
+			const base = rawBase.replace(/\/+$/, '');
+			const leaf = rawLeaf.replace(/^\/+/, '');
 			if (!leaf) return base || '/';
 			return (base === '/' ? '' : base) + '/' + leaf;
 		}
 
+		/**
+		 * Breadcrumb rows for a path. Windows paths keep their drive (or UNC
+		 * share) as the root crumb and use backslashes; POSIX and `~` paths keep
+		 * the existing behaviour.
+		 */
 		function breadcrumbParts(path) {
 			const raw = String(path === undefined || path === null ? '' : path);
 			const parts = [];
+			if (isWindowsPath(raw)) {
+				if (raw.indexOf('\\\\') === 0) {
+					const segments = raw.split(/[\\/]+/).filter(function notEmpty(segment) { return Boolean(segment); });
+					if (segments.length >= 2) {
+						const root = '\\\\' + segments[0] + '\\' + segments[1];
+						parts.push({ label: root, path: root });
+						let acc = root;
+						for (const segment of segments.slice(2)) {
+							acc += '\\' + segment;
+							parts.push({ label: segment, path: acc });
+						}
+						return parts;
+					}
+				}
+				const drive = raw.slice(0, 2);
+				parts.push({ label: drive + '\\', path: drive + '\\' });
+				let acc = drive;
+				for (const segment of raw.slice(2).split(/[\\/]+/)) {
+					if (!segment) continue;
+					acc += '\\' + segment;
+					parts.push({ label: segment, path: acc });
+				}
+				return parts;
+			}
 			if (raw === '~' || raw.indexOf('~/') === 0) {
 				parts.push({ label: '~', path: '~' });
 				let acc = '~';
@@ -440,6 +531,20 @@ window.__ModuleLoader__.load({
 				parts.push({ label: segment, path: acc });
 			}
 			return parts;
+		}
+
+		/** Localised name of the controlled platform (`welcome.agent.platform`). */
+		function platformLabel(t, platform) {
+			if (!platform) return '';
+			const key = PLATFORM_LABEL_KEYS[platform];
+			return key ? t(key) : platform;
+		}
+
+		/** Localised name of the current frame encoding (`tiles` or `jpeg`). */
+		function encodingLabel(t, encoding) {
+			if (encoding === 'jpeg') return t('toolbar.encodingJpeg');
+			if (encoding === 'tiles') return t('toolbar.encodingTiles');
+			return '';
 		}
 
 		function newHostId() {
@@ -627,6 +732,69 @@ window.__ModuleLoader__.load({
 		}
 
 		// ==================================================================
+		// 4b. JPEG frame decoding (Windows backends send full-frame JPEG)
+		// ==================================================================
+
+		/**
+		 * Draw one full-frame JPEG payload onto the screen canvas.
+		 * `createImageBitmap` is the fast path (Blob -> ImageBitmap -> drawImage);
+		 * browsers without it fall back to an HTMLImageElement + object URL. The
+		 * bitmap is always closed so repeated frames do not leak GPU memory.
+		 */
+		async function drawJpegFrame(context, bytes, width, height) {
+			if (!context) throw makeError('no_canvas');
+			if (!bytes || !bytes.byteLength) throw makeError('bad_frame', 'empty JPEG payload');
+			if (typeof Blob !== 'function') throw makeError('no_image_decoder', 'Blob is unavailable');
+			const blob = new Blob([bytes], { type: 'image/jpeg' });
+			if (typeof createImageBitmap === 'function') {
+				let bitmap = null;
+				try {
+					bitmap = await createImageBitmap(blob);
+					context.drawImage(bitmap, 0, 0, width, height);
+				} catch (error) {
+					throw makeError('decode_failed', String((error && error.message) || error));
+				} finally {
+					if (bitmap && typeof bitmap.close === 'function') {
+						try {
+							bitmap.close();
+						} catch (error) {
+							/* the bitmap is already gone */
+						}
+					}
+				}
+				return;
+			}
+			await drawJpegWithImage(context, blob, width, height);
+		}
+
+		/** HTMLImageElement fallback for browsers without createImageBitmap. */
+		async function drawJpegWithImage(context, blob, width, height) {
+			if (typeof Image !== 'function' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+				throw makeError('no_image_decoder', 'no JPEG decoder is available');
+			}
+			const href = URL.createObjectURL(blob);
+			try {
+				const image = await new Promise(function loadImage(resolve, reject) {
+					const element = new Image();
+					element.onload = function onload() {
+						resolve(element);
+					};
+					element.onerror = function onerror() {
+						reject(makeError('decode_failed', 'JPEG image failed to load'));
+					};
+					element.src = href;
+				});
+				context.drawImage(image, 0, 0, width, height);
+			} finally {
+				try {
+					URL.revokeObjectURL(href);
+				} catch (error) {
+					/* already revoked */
+				}
+			}
+		}
+
+		// ==================================================================
 		// 5. RemoteClient — one browser session with one agent
 		// ==================================================================
 
@@ -642,6 +810,7 @@ window.__ModuleLoader__.load({
 				this.token = null;
 				this.ws = null;
 				this.fps = 15;
+				this.quality = DEFAULT_QUALITY;
 				this.screenWanted = false;
 				this.shellWanted = false;
 				this.shellParams = null;
@@ -948,7 +1117,7 @@ window.__ModuleLoader__.load({
 						this._startHeartbeat();
 						this._setStatus('connected');
 						if (this.screenWanted) {
-							this._sendRaw({ t: 'screen.start', fps: this.fps, tile: 64, quality: 'auto' });
+							this._sendRaw(this._screenStartMessage());
 						}
 						if (this.shellWanted && this.shellParams) {
 							this._sendRaw({
@@ -1081,17 +1250,36 @@ window.__ModuleLoader__.load({
 				return this._sendRaw({ t: 'releaseAll' });
 			}
 
+			_screenStartMessage() {
+				return { t: 'screen.start', fps: this.fps, tile: 64, quality: this.quality };
+			}
+
 			setFps(fps) {
 				const next = Number(fps);
 				if (!Number.isFinite(next) || next <= 0) return;
 				this.fps = next;
-				if (this.screenWanted) this._sendRaw({ t: 'screen.start', fps: next, tile: 64, quality: 'auto' });
+				if (this.screenWanted) this._sendRaw(this._screenStartMessage());
 			}
 
-			startScreen(fps) {
+			/**
+			 * Change the JPEG quality (30..90). The agent records it per session,
+			 * so a new `screen.start` updates the running capture without opening
+			 * a second screen subscription. Tile backends simply ignore it.
+			 */
+			setQuality(quality) {
+				const next = Math.round(Number(quality));
+				if (!Number.isFinite(next)) return;
+				this.quality = Math.max(30, Math.min(90, next));
+				if (this.screenWanted) this._sendRaw(this._screenStartMessage());
+			}
+
+			startScreen(fps, quality) {
 				if (typeof fps === 'number' && fps > 0) this.fps = fps;
+				if (typeof quality === 'number' && Number.isFinite(quality)) {
+					this.quality = Math.max(30, Math.min(90, Math.round(quality)));
+				}
 				this.screenWanted = true;
-				return this._sendRaw({ t: 'screen.start', fps: this.fps, tile: 64, quality: 'auto' });
+				return this._sendRaw(this._screenStartMessage());
 			}
 
 			stopScreen() {
@@ -1185,7 +1373,7 @@ window.__ModuleLoader__.load({
 				const response = await this._api('/api/fs/download?path=' + encodeURIComponent(String(path)));
 				const blob = await response.blob();
 				const header = response.headers && response.headers.get ? response.headers.get('Content-Disposition') : null;
-				let name = String(path).split('/').pop() || 'download';
+				let name = String(path).split(/[\\/]/).pop() || 'download';
 				if (header) {
 					const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(header);
 					const plain = /filename="?([^";]+)"?/i.exec(header);
@@ -1755,6 +1943,9 @@ window.__ModuleLoader__.load({
 			const pendingMoveRef = useRef(null);
 			const moveRafRef = useRef(0);
 			const aliveRef = useRef(true);
+			const encodingRef = useRef(null);
+			const onEncodingRef = useRef(props.onEncoding);
+			onEncodingRef.current = props.onEncoding;
 			useEffect(function trackAlive() {
 				aliveRef.current = true;
 				return function cleanup() {
@@ -1876,22 +2067,30 @@ window.__ModuleLoader__.load({
 				}
 				const context = canvas.getContext('2d', { alpha: false });
 				if (!context) throw makeError('no_canvas');
-				const tiles = Array.isArray(header.tiles) ? header.tiles : [];
-				for (const tile of tiles) {
-					const tileWidth = Math.round(Number(tile.w));
-					const tileHeight = Math.round(Number(tile.h));
-					const offset = Math.round(Number(tile.off));
-					const length = Math.round(Number(tile.len));
-					if (!(tileWidth > 0) || !(tileHeight > 0) || !(length > 0) || offset < 0 || offset + length > payload.byteLength) {
-						throw makeError('bad_tile', 'tile outside payload');
+				const encoding = header.encoding === 'jpeg' ? 'jpeg' : 'tiles';
+				if (encoding === 'jpeg') {
+					// Windows backends send one full JPEG frame per tick: no tiles,
+					// no deflate stream, and the frame always covers the canvas.
+					if (!canvas.width || !canvas.height) throw makeError('bad_frame', 'JPEG frame without a canvas size');
+					await drawJpegFrame(context, payload, canvas.width, canvas.height);
+				} else {
+					const tiles = Array.isArray(header.tiles) ? header.tiles : [];
+					for (const tile of tiles) {
+						const tileWidth = Math.round(Number(tile.w));
+						const tileHeight = Math.round(Number(tile.h));
+						const offset = Math.round(Number(tile.off));
+						const length = Math.round(Number(tile.len));
+						if (!(tileWidth > 0) || !(tileHeight > 0) || !(length > 0) || offset < 0 || offset + length > payload.byteLength) {
+							throw makeError('bad_tile', 'tile outside payload');
+						}
+						const rgba = await inflateDeflate(payload.subarray(offset, offset + length));
+						const expected = tileWidth * tileHeight * 4;
+						if (rgba.byteLength < expected) throw makeError('bad_tile', 'tile payload too small');
+						let data;
+						if (rgba.byteLength === expected) data = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, expected);
+						else data = new Uint8ClampedArray(rgba.slice(0, expected));
+						context.putImageData(new ImageData(data, tileWidth, tileHeight), Math.round(Number(tile.x)), Math.round(Number(tile.y)));
 					}
-					const rgba = await inflateDeflate(payload.subarray(offset, offset + length));
-					const expected = tileWidth * tileHeight * 4;
-					if (rgba.byteLength < expected) throw makeError('bad_tile', 'tile payload too small');
-					let data;
-					if (rgba.byteLength === expected) data = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, expected);
-					else data = new Uint8ClampedArray(rgba.slice(0, expected));
-					context.putImageData(new ImageData(data, tileWidth, tileHeight), Math.round(Number(tile.x)), Math.round(Number(tile.y)));
 				}
 				if (header.cursor) {
 					cursorDataRef.current = {
@@ -1902,6 +2101,12 @@ window.__ModuleLoader__.load({
 						have: true,
 					};
 					updateCursor();
+				}
+				if (decodeErrorRef.current) {
+					// A later frame decoded fine (e.g. one corrupt JPEG): drop the
+					// overlay without waiting for a manual retry.
+					decodeErrorRef.current = false;
+					if (aliveRef.current) setDecodeError(null);
 				}
 				if (!firstFrameRef.current) {
 					firstFrameRef.current = true;
@@ -1933,7 +2138,20 @@ window.__ModuleLoader__.load({
 			useEffect(function subscribeFrames() {
 				const offFrame = client.on('frame', function onFrame(item) {
 					if (!item) return;
+					const frameEncoding = item.header && item.header.encoding === 'jpeg' ? 'jpeg' : 'tiles';
+					if (encodingRef.current !== frameEncoding) {
+						encodingRef.current = frameEncoding;
+						if (onEncodingRef.current) onEncodingRef.current(frameEncoding);
+					}
 					const queue = queueRef.current;
+					if (frameEncoding === 'jpeg') {
+						// A JPEG frame is a complete picture: when decoding falls
+						// behind, only the newest one is worth painting.
+						for (let index = queue.length - 1; index >= 0; index -= 1) {
+							const queued = queue[index];
+							if (queued && queued.header && queued.header.encoding === 'jpeg') queue.splice(index, 1);
+						}
+					}
 					if (queue.length >= MAX_PENDING_FRAMES) {
 						// We are too far behind to trust incremental tiles; drop the
 						// backlog and ask for a fresh keyframe instead.
@@ -2188,7 +2406,7 @@ window.__ModuleLoader__.load({
 							h(
 								'div',
 								{ className: 'rdx-screen-error' },
-								h('div', null, decodeError.code === 'no_decompression' ? t('session.decodeUnsupported') : decodeError.code === 'decode_failed' ? t('session.decodeFailed') : describeError(t, decodeError)),
+								h('div', null, decodeError.code === 'no_decompression' ? t('session.decodeUnsupported') : decodeError.code === 'no_image_decoder' ? t('session.jpegUnsupported') : decodeError.code === 'decode_failed' ? t('session.decodeFailed') : describeError(t, decodeError)),
 								h(Btn, { size: 'sm', icon: 'refresh', onClick: function reload() { decodeErrorRef.current = false; setDecodeError(null); client.refreshScreen(); } }, t('common.retry')),
 							),
 						)
@@ -2979,6 +3197,10 @@ window.__ModuleLoader__.load({
 			const [fps, setFps] = useState(function initialFps() {
 				return client && client.fps ? client.fps : 15;
 			});
+			const [quality, setQuality] = useState(function initialQuality() {
+				return client && client.quality ? client.quality : DEFAULT_QUALITY;
+			});
+			const [encoding, setEncoding] = useState(null);
 			const [drawer, setDrawer] = useState(null);
 			const [captured, setCaptured] = useState(false);
 			const [pasteOpen, setPasteOpen] = useState(false);
@@ -2987,6 +3209,11 @@ window.__ModuleLoader__.load({
 			});
 			const cwdRef = useRef(cwd);
 			cwdRef.current = cwd;
+			const qualityRef = useRef(quality);
+			qualityRef.current = quality;
+			const screenAvailable = Boolean(welcome && welcome.screen);
+			const platformName = platformLabel(t, welcome && welcome.agent ? welcome.agent.platform : null);
+			const encodingName = encodingLabel(t, encoding);
 
 			const handleCapturedChange = useCallback(function handleCapturedChange(next) {
 				setCaptured(Boolean(next));
@@ -2994,11 +3221,11 @@ window.__ModuleLoader__.load({
 
 			useEffect(function driveScreenSubscription() {
 				if (status !== 'connected' && status !== 'reconnecting') return undefined;
-				client.startScreen(fps);
+				client.startScreen(fps, qualityRef.current);
 				return function stopScreen() {
 					client.stopScreen();
 				};
-			}, [client, status, fps]);
+			}, [client, status]);
 
 			useEffect(function releaseWhenNotConnected() {
 				if (status !== 'connected' && status !== 'reconnecting' && captured) setCaptured(false);
@@ -3009,6 +3236,15 @@ window.__ModuleLoader__.load({
 				if (!Number.isFinite(next)) return;
 				setFps(next);
 				client.setFps(next);
+			};
+
+			const changeQuality = function changeQuality(value) {
+				const next = Number(value);
+				if (!Number.isFinite(next)) return;
+				setQuality(next);
+				// Re-sending screen.start updates the running session's quality without
+				// opening a second subscription (the agent records quality per session).
+				client.setQuality(next);
 			};
 
 			const releaseKeyboard = function releaseKeyboard() {
@@ -3053,6 +3289,14 @@ window.__ModuleLoader__.load({
 						{ className: 'rdx-toolbar-title' },
 						h(StatusDot, { state: status }),
 						h('span', { className: 'rdx-toolbar-host' }, host.name),
+						platformName || encodingName
+							? h(
+									'span',
+									{ className: 'rdx-toolbar-meta' },
+									platformName ? h('span', { className: 'rdx-toolbar-chip', title: t('toolbar.platform') }, platformName) : null,
+									encodingName ? h('span', { className: 'rdx-toolbar-chip', title: t('toolbar.encoding') }, encodingName) : null,
+								)
+							: null,
 						reconnecting
 							? h('span', { className: 'rdx-muted rdx-toolbar-note' }, t('session.reconnecting', {
 									attempt: stateInfo && stateInfo.attempt ? stateInfo.attempt : 1,
@@ -3079,6 +3323,26 @@ window.__ModuleLoader__.load({
 							}),
 						),
 					),
+					screenAvailable
+						? h(
+								'label',
+								{ className: 'rdx-fps', title: t('toolbar.qualityHint') },
+								h('span', { className: 'rdx-muted' }, t('toolbar.quality')),
+								h(
+									'select',
+									{
+										className: 'rdx-select',
+										value: String(quality),
+										onChange: function change(event) {
+											changeQuality(event.target.value);
+										},
+									},
+									QUALITY_OPTIONS.map(function renderQuality(option) {
+										return h('option', { key: option, value: String(option) }, t(QUALITY_LABEL_KEYS[option] || 'toolbar.quality65', { value: option }));
+									}),
+								),
+							)
+						: null,
 					h(Btn, { size: 'sm', icon: 'refreshScreen', title: t('toolbar.refresh'), 'aria-label': t('toolbar.refresh'), onClick: function refresh() { client.refreshScreen(); } }),
 					h(Btn, {
 						size: 'sm',
@@ -3129,6 +3393,7 @@ window.__ModuleLoader__.load({
 						welcome: welcome,
 						captured: captured,
 						onCapturedChange: handleCapturedChange,
+						onEncoding: setEncoding,
 						canvasLabel: t('session.screenHint'),
 					}),
 					drawer
@@ -3545,9 +3810,11 @@ window.__ModuleLoader__.load({
 			'.rdx-muted{color:var(--dsw-alias-label-secondary)}',
 			'.rdx-session{flex:1;min-height:0;display:flex;flex-direction:column}',
 			'.rdx-toolbar{height:40px;flex:none;display:flex;align-items:center;gap:6px;padding:0 10px;border-bottom:1px solid var(--dsw-alias-border-l1);overflow-x:auto;overflow-y:hidden;white-space:nowrap}',
-			'.rdx-toolbar-title{display:flex;align-items:center;gap:6px;min-width:0;max-width:320px;font-size:12px}',
+			'.rdx-toolbar-title{display:flex;align-items:center;gap:6px;min-width:0;max-width:460px;font-size:12px}',
 			'.rdx-toolbar-host{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}',
 			'.rdx-toolbar-note{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+			'.rdx-toolbar-meta{display:flex;align-items:center;gap:4px;flex:none;min-width:0;overflow:hidden}',
+			'.rdx-toolbar-chip{display:inline-block;max-width:120px;padding:0 6px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
 			'.rdx-toolbar-spacer{flex:1;min-width:8px}',
 			'.rdx-fps{display:flex;align-items:center;gap:4px;flex:none;font-size:12px}',
 			'.rdx-select{height:28px;padding:0 6px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}',

@@ -39,6 +39,7 @@ import {
   pixelHex,
   countColor,
 } from './lib/xwd.mjs';
+import { parseJpeg, looksLikeJpeg } from './lib/jpeg.mjs';
 import { writePng } from './lib/png.mjs';
 import {
   startXterm,
@@ -307,12 +308,31 @@ class RemoteClient {
     const width = Number(header.width);
     const height = Number(header.height);
     assert(width > 0 && height > 0, `${this.name}: frame has invalid size ${header.width}x${header.height}`);
+    assertEqual(payload.length, Number(header.payloadLen), `${this.name}: frame payloadLen`);
+
+    // Windows backend frames carry one complete JPEG instead of tiles.
+    const encoding = header.encoding === 'jpeg' ? 'jpeg' : 'tiles';
+    if (encoding === 'jpeg') {
+      assert(header.keyframe === true, `${this.name}: a JPEG frame must be a full frame (keyframe=true)`);
+      assert(header.tiles === undefined, `${this.name}: a JPEG frame must not carry tiles`);
+      return {
+        header,
+        encoding,
+        tiles: [],
+        tileArea: 0,
+        payload: Buffer.from(payload),
+        payloadLen: payload.length,
+        seq: header.seq,
+        keyframe: true,
+        cursor: header.cursor ?? null,
+      };
+    }
+
     if (!this.canvas || this.canvasWidth !== width || this.canvasHeight !== height) {
       this.canvas = Buffer.alloc(width * height * 4);
       this.canvasWidth = width;
       this.canvasHeight = height;
     }
-    assertEqual(payload.length, Number(header.payloadLen), `${this.name}: frame payloadLen`);
     let tileArea = 0;
     for (const tile of header.tiles) {
       const raw = zlib.inflateSync(payload.subarray(tile.off, tile.off + tile.len));
@@ -325,6 +345,7 @@ class RemoteClient {
     }
     return {
       header,
+      encoding,
       tiles: header.tiles,
       payloadLen: payload.length,
       tileArea,
@@ -475,6 +496,7 @@ function tileCovers(frame, x, y) {
   );
 }
 
+
 // ---- xev log parsing -------------------------------------------------------
 
 function parseXevEvents(text) {
@@ -540,7 +562,197 @@ async function main() {
     xvfbStopped: false,
     display99Before: null,
     display98Before: null,
+    win32: { agents: [], main: null, timeout: null },
   };
+
+// ---- Windows (win32) backend helpers: fake helper + extra Agent instances ---
+
+const WIN32_HELPER = path.join(REPO_DIR, 'test', 'fixtures', 'fake-win-helper.mjs');
+const WIN32_JPEG_FIXTURE = path.join(REPO_DIR, 'test', 'fixtures', 'fake-800x600.jpg');
+const WIN32_INPUT_CMDS = new Set(['mouse', 'wheel', 'key', 'text', 'releaseAll']);
+
+function readHelperLog(helperLogPath) {
+  try {
+    const text = fs.readFileSync(helperLogPath, 'utf8').trim();
+    if (!text) return [];
+    return text.split('\n').filter(Boolean).map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return { cmd: '__invalid_json__', raw: line };
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Find the fake-helper processes that belong to one test Agent by scanning
+ * /proc/<pid>/environ for FAKE_HELPER_LOG=<this run's helper log>. Scoping by
+ * log path keeps the assertion exact even if other teammates run their own
+ * helpers concurrently on this machine.
+ */
+function findHelperPids(helperLogPath) {
+  const pids = [];
+  let entries = [];
+  try {
+    entries = fs.readdirSync('/proc');
+  } catch {
+    return pids;
+  }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    const pid = Number(entry);
+    if (pid === process.pid) continue;
+    let environ;
+    let cmdline;
+    try {
+      environ = fs.readFileSync(`/proc/${pid}/environ`).toString('latin1');
+      cmdline = fs.readFileSync(`/proc/${pid}/cmdline`).toString('latin1');
+    } catch {
+      continue;
+    }
+    if (!cmdline.includes('fake-win-helper.mjs')) continue;
+    if (!environ.split('\0').some((kv) => kv === `FAKE_HELPER_LOG=${helperLogPath}`)) continue;
+    pids.push(pid);
+  }
+  return pids;
+}
+
+function forceKillHelpersFor(helperLogPath) {
+  for (const pid of findHelperPids(helperLogPath)) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+/**
+ * Start an Agent whose platform is win32 (detected from RDA_HELPER_CMD) with
+ * the fake Windows helper. The fake helper speaks docs/WINDOWS.md §2 JSON
+ * Lines and returns the committed 800x600 JPEG fixture for every capture.
+ */
+async function startWin32Agent({ label, helperEnv = {}, fsRootDir = null }) {
+  const agentLog = path.join(ctx.tmpDir, `win32-agent-${label}.log`);
+  const helperLog = path.join(ctx.tmpDir, `win32-helper-${label}.log`);
+  fs.writeFileSync(agentLog, '');
+  fs.writeFileSync(helperLog, '');
+  const port = await findFreePort(preferredPort + 40 + ctx.win32.agents.length * 7);
+  const logFd = fs.openSync(agentLog, 'a');
+  const proc = spawn(
+    process.execPath,
+    [
+      AGENT_ENTRY,
+      '--port',
+      String(port),
+      '--bind',
+      '127.0.0.1',
+      '--password',
+      PASSWORD,
+      '--fs-root',
+      fsRootDir || path.join(ctx.tmpDir, `win-fsroot-${label}`),
+    ],
+    {
+      cwd: REPO_DIR,
+      env: {
+        ...process.env,
+        RDA_HELPER_CMD: `${process.execPath} ${WIN32_HELPER}`,
+        FAKE_HELPER_LOG: helperLog,
+        ...helperEnv,
+      },
+      stdio: ['ignore', logFd, logFd],
+    },
+  );
+  fs.closeSync(logFd);
+
+  const instance = {
+    label,
+    proc,
+    pid: proc.pid,
+    port,
+    agentLog,
+    helperLog,
+    http: createHttp(`http://127.0.0.1:${port}`),
+    token: null,
+    client: null,
+    stopped: false,
+  };
+  ctx.win32.agents.push(instance);
+
+  await waitFor(
+    async () => {
+      if (proc.exitCode !== null || proc.signalCode !== null) {
+        throw new Error(
+          `win32 agent "${label}" exited early (code=${proc.exitCode}, signal=${proc.signalCode}); ` +
+            `log:\n${tailFile(agentLog)}`,
+        );
+      }
+      try {
+        const response = await instance.http.request('/health', { timeoutMs: 1500 });
+        return response.status === 200;
+      } catch {
+        return false;
+      }
+    },
+    { timeoutMs: 25000, intervalMs: 100, label: `win32 agent "${label}" /health` },
+  );
+  const auth = await instance.http.request('/api/auth', { method: 'POST', json: { password: PASSWORD } });
+  assertEqual(auth.status, 200, `win32 agent "${label}" auth status`);
+  instance.token = auth.json.token;
+
+  const agentLogText = tailFile(agentLog, 4000);
+  assertIncludes(agentLogText, 'win32 JPEG', `win32 agent "${label}" startup log must mention the JPEG helper backend`);
+  return instance;
+}
+
+async function connectWin32Client(instance, name) {
+  const client = await RemoteClient.connect(
+    `ws://127.0.0.1:${instance.port}/ws?token=${encodeURIComponent(instance.token)}`,
+    name,
+  );
+  ctx.clients.push(client);
+  instance.client = client;
+  return client;
+}
+
+async function stopWin32Agent(instance, { timeoutMs = 10000 } = {}) {
+  if (!instance) return null;
+  if (instance.stopped) return instance.proc.exitCode;
+  instance.stopped = true;
+  if (instance.client && !instance.client.closed) {
+    try {
+      await instance.client.close();
+    } catch {
+      /* ignore */
+    }
+  }
+  const childrenBefore = listChildren(instance.proc.pid);
+  if (instance.proc.exitCode === null && instance.proc.signalCode === null) {
+    try {
+      process.kill(instance.proc.pid, 'SIGINT');
+    } catch {
+      /* already gone */
+    }
+    assert(
+      await waitForExit(instance.proc, timeoutMs),
+      `win32 agent "${instance.label}" (pid ${instance.proc.pid}) did not exit within ${timeoutMs}ms after SIGINT`,
+    );
+  }
+  await waitFor(() => findHelperPids(instance.helperLog).length === 0, {
+    timeoutMs: 8000,
+    intervalMs: 100,
+    label: `fake helper processes for "${instance.label}" to exit`,
+  }).catch(() => {});
+  const helperSurvivors = findHelperPids(instance.helperLog);
+  if (helperSurvivors.length > 0) forceKillHelpersFor(instance.helperLog);
+  assertEqual(helperSurvivors, [], `fake helper processes for "${instance.label}" must not survive`);
+  const childSurvivors = childrenBefore.filter(pidAlive);
+  assertEqual(childSurvivors, [], `win32 agent "${instance.label}" child processes must not survive`);
+  return instance.proc.exitCode;
+}
 
   console.log('========================================================================');
   console.log('Remote desktop E2E — real Xvfb + real Agent process + protocol client');
@@ -1325,6 +1537,256 @@ async function main() {
         assert(fs.existsSync('/tmp/.X11-unix/X98'), ':98 display socket was left untouched');
       }
     });
+
+    // ---- Windows (win32) platform backend --------------------------------
+    // These cases run a second/third/fourth Agent instance on Linux with
+    // RDA_HELPER_CMD pointing at test/fixtures/fake-win-helper.mjs; the Agent
+    // then selects backend-win32 and speaks JPEG frames. No Xvfb is needed.
+    await testCase('23 win32 backend: /api/info + welcome report platform=win32, helper screen 800x600', async () => {
+      const main = await startWin32Agent({
+        label: 'main',
+        fsRootDir: path.join(ctx.tmpDir, 'win-fsroot-main'),
+      });
+      ctx.win32.main = main;
+
+      const info = await main.http.request('/api/info', { token: main.token });
+      assertEqual(info.status, 200, 'win32 /api/info status');
+      assertEqual(info.json.protocol, 1, 'win32 info.protocol');
+      assertEqual(info.json.agent.platform, 'win32', 'win32 info.agent.platform');
+      assertEqual(info.json.screen, { width: 800, height: 600 }, 'win32 info.screen must come from helper hello');
+      assertEqual(
+        {
+          screen: info.json.capabilities.screen,
+          input: info.json.capabilities.input,
+          text: info.json.capabilities.text,
+        },
+        { screen: true, input: true, text: true },
+        'win32 info capabilities.screen/input/text',
+      );
+
+      const client = await connectWin32Client(main, 'win32-main');
+      const welcome = await client.hello();
+      assertEqual(welcome.protocol, 1, 'win32 welcome.protocol');
+      assertEqual(welcome.agent.platform, 'win32', 'win32 welcome.agent.platform');
+      assertEqual(welcome.screen, { width: 800, height: 600 }, 'win32 welcome.screen');
+      assertEqual(
+        {
+          screen: welcome.capabilities.screen,
+          input: welcome.capabilities.input,
+          text: welcome.capabilities.text,
+        },
+        { screen: true, input: true, text: true },
+        'win32 welcome capabilities.screen/input/text',
+      );
+      assertEqual(path.resolve(welcome.fsRoot), path.resolve(path.join(ctx.tmpDir, 'win-fsroot-main')), 'win32 welcome.fsRoot');
+
+      // Start the capture-timeout fault agent now: its ~10s backend timeout
+      // then overlaps cases 24/25 and the crash/bad-JSON checks of case 26, so
+      // the whole suite stays under the 20s budget without relaxing anything.
+      const timeoutWin = await startWin32Agent({
+        label: 'timeout',
+        fsRootDir: path.join(ctx.tmpDir, 'win-fsroot-timeout'),
+        helperEnv: { FAKE_HELPER_DELAY_MS: '12000' },
+      });
+      const timeoutClient = await connectWin32Client(timeoutWin, 'win32-timeout');
+      await timeoutClient.hello();
+      const timeoutMark = timeoutClient.mark();
+      timeoutClient.send({ t: 'screen.start', fps: 5, quality: 65 });
+      ctx.win32.timeout = { instance: timeoutWin, client: timeoutClient, mark: timeoutMark, startedAt: Date.now() };
+    });
+
+    await testCase('24 win32 screen: screen.start yields encoding="jpeg" full frames with a valid 800x600 JPEG', async () => {
+      const main = ctx.win32.main;
+      assert(main && main.client, 'win32 main agent/client from case 23');
+      const client = main.client;
+      const mark = client.mark();
+      client.send({ t: 'screen.start', fps: 10, quality: 65 });
+      const started = await client.waitForNewMessage((message) => message.t === 'screen.started', {
+        label: 'win32 screen.started',
+        mark,
+      });
+      assertEqual([started.width, started.height], [800, 600], 'win32 screen.started size');
+      assertEqual(started.fps, 10, 'win32 screen.started fps');
+
+      const frame = await client.waitForNewFrame((candidate) => candidate.encoding === 'jpeg', {
+        label: 'win32 JPEG frame',
+        mark,
+      });
+      const header = frame.header;
+      assertEqual(header.t, 'frame', 'jpeg frame header.t');
+      assertEqual(header.encoding, 'jpeg', 'jpeg frame header.encoding');
+      assertEqual(header.keyframe, true, 'jpeg frame must be a full frame (keyframe=true)');
+      assertEqual([header.width, header.height], [800, 600], 'jpeg frame header dimensions');
+      assert(header.tiles === undefined, 'jpeg frame must not carry tiles');
+      assert(header.cursor && typeof header.cursor === 'object', 'jpeg frame header.cursor');
+      for (const key of ['x', 'y', 'buttons']) {
+        assert(typeof header.cursor[key] === 'number', `jpeg frame cursor.${key} must be a number`);
+      }
+      assertEqual(header.payloadLen, frame.payload.length, 'header.payloadLen must equal the payload length');
+      assertEqual(frame.payloadLen, frame.payload.length, 'frame payloadLen must equal the payload length');
+      assert(frame.payload.length > 1000, `JPEG payload looks too small: ${frame.payload.length} bytes`);
+
+      assertEqual(frame.payload.subarray(0, 2).toString('hex'), 'ffd8', 'JPEG SOI marker (FFD8)');
+      assertEqual(frame.payload.subarray(-2).toString('hex'), 'ffd9', 'JPEG EOI marker (FFD9)');
+      assert(looksLikeJpeg(frame.payload), 'payload must start with FFD8 and end with FFD9');
+      const parsed = parseJpeg(frame.payload);
+      assert(parsed.valid, `payload must be a structurally valid JPEG: ${JSON.stringify(parsed)}`);
+      assertEqual([parsed.width, parsed.height], [800, 600], 'JPEG SOF dimensions');
+      assertEqual(parsed.precision, 8, 'JPEG precision');
+      assertEqual(parsed.format, 'baseline', 'JPEG format');
+      const fixtureBytes = fs.readFileSync(WIN32_JPEG_FIXTURE);
+      assert(frame.payload.equals(fixtureBytes), 'fake helper must return the committed JPEG fixture bytes');
+
+      // JPEG frames are always full frames and keep streaming with a growing seq.
+      const second = await client.waitForNewFrame(
+        (candidate) => candidate.encoding === 'jpeg' && candidate.seq > frame.seq,
+        { label: 'second win32 JPEG frame' },
+      );
+      assert(second.seq > frame.seq, 'jpeg frame seq must increase');
+
+      const stopMark = client.mark();
+      client.send({ t: 'screen.stop' });
+      await client.waitForNewMessage((message) => message.t === 'screen.stopped', {
+        label: 'win32 screen.stopped',
+        mark: stopMark,
+      });
+    });
+
+    await testCase('25 win32 input: mouse/wheel/key(+mods)/text/releaseAll forwarded verbatim to helper', async () => {
+      const main = ctx.win32.main;
+      assert(main && main.client, 'win32 main agent/client from case 23');
+      const client = main.client;
+      const sent = [
+        { t: 'mouse', action: 'move', x: 320, y: 240 },
+        { t: 'mouse', action: 'down', x: 320, y: 240, button: 0 },
+        { t: 'mouse', action: 'up', x: 320, y: 240, button: 0 },
+        { t: 'wheel', dx: 0, dy: 120 },
+        { t: 'key', code: 'ShiftLeft', key: 'Shift', down: true, mods: { shift: false, ctrl: false, alt: false, meta: false } },
+        { t: 'key', code: 'KeyA', key: 'A', down: true, mods: { shift: true, ctrl: false, alt: false, meta: false } },
+        { t: 'key', code: 'KeyA', key: 'A', down: false, mods: { shift: true, ctrl: false, alt: false, meta: false } },
+        { t: 'text', text: '你好 Windows' },
+        { t: 'releaseAll' },
+      ];
+      // backend-win32 maps protocol messages to {cmd:...} helper commands and
+      // forwards exactly the documented fields (docs/WINDOWS.md §2).
+      const expected = sent.map(({ t, ...fields }) => ({ cmd: t, ...fields }));
+      for (const message of sent) client.send(message);
+      await waitFor(
+        () =>
+          readHelperLog(main.helperLog).filter((line) => WIN32_INPUT_CMDS.has(line.cmd)).length >=
+          expected.length,
+        { timeoutMs: 8000, intervalMs: 50, label: 'fake helper to log all forwarded input commands' },
+      );
+      const forwarded = readHelperLog(main.helperLog).filter((line) => WIN32_INPUT_CMDS.has(line.cmd));
+      assertEqual(forwarded.slice(0, expected.length), expected, 'win32 input commands forwarded verbatim, in order');
+      for (const line of forwarded) {
+        assert(line.t === undefined, `helper input command must not carry protocol field "t": ${JSON.stringify(line)}`);
+        assert(line.id === undefined, `helper input command must not carry an id: ${JSON.stringify(line)}`);
+      }
+      assertEqual((await main.http.request('/health')).status, 200, 'win32 /health after input forwarding');
+    });
+
+    await testCase('26 win32 faults: helper crash / malformed JSON / capture timeout — Agent stays alive', async () => {
+      // (a) helper crashes right after its 2nd capture
+      const crashWin = await startWin32Agent({ label: 'crash', helperEnv: { FAKE_HELPER_CRASH_AFTER: '2' } });
+      const crashClient = await connectWin32Client(crashWin, 'win32-crash');
+      await crashClient.hello();
+      const crashMark = crashClient.mark();
+      crashClient.send({ t: 'screen.start', fps: 10, quality: 65 });
+      const crashOutcome = await waitFor(
+        () => {
+          const error = crashClient._scanMessages((message) => message.t === 'error', crashMark.messages);
+          if (error) return { kind: 'error', error };
+          if (crashClient.closed) return { kind: 'closed' };
+          return false;
+        },
+        { timeoutMs: 12000, intervalMs: 50, label: 'helper crash to surface on the WebSocket' },
+      );
+      assertEqual(crashOutcome.kind, 'error', 'helper crash must be reported as a WS error, not a silent death');
+      assertEqual(crashOutcome.error.code, 'no_screen', 'helper crash error code');
+      assertIncludes(crashOutcome.error.message, 'Windows helper exited', 'helper crash error message');
+      assert(
+        crashWin.proc.exitCode === null && crashWin.proc.signalCode === null,
+        'agent must stay alive after helper crash',
+      );
+      assertEqual((await crashWin.http.request('/health')).status, 200, 'crash agent /health after crash');
+
+      // (b) helper emits one malformed JSON line before the first capture response
+      const badWin = await startWin32Agent({ label: 'badjson', helperEnv: { FAKE_HELPER_BAD_JSON: '1' } });
+      const badClient = await connectWin32Client(badWin, 'win32-badjson');
+      await badClient.hello();
+      const badMark = badClient.mark();
+      badClient.send({ t: 'screen.start', fps: 10, quality: 65 });
+      const badOutcome = await waitFor(
+        () => {
+          const error = badClient._scanMessages((message) => message.t === 'error', badMark.messages);
+          if (error) return { kind: 'error', error };
+          if (badClient.closed) return { kind: 'closed' };
+          return false;
+        },
+        { timeoutMs: 12000, intervalMs: 50, label: 'malformed helper JSON to surface on the WebSocket' },
+      );
+      assertEqual(badOutcome.kind, 'error', 'malformed helper JSON must be reported as a WS error');
+      assertEqual(badOutcome.error.code, 'no_screen', 'malformed JSON error code');
+      assertIncludes(badOutcome.error.message, 'malformed JSON', 'malformed JSON error message');
+      assert(
+        badWin.proc.exitCode === null && badWin.proc.signalCode === null,
+        'agent must stay alive after malformed helper JSON',
+      );
+      assertEqual((await badWin.http.request('/health')).status, 200, 'bad-json agent /health after fault');
+
+      // (c) capture timeout: helper delays 12s, backend capture timeout is 10s
+      const timeout = ctx.win32.timeout;
+      assert(timeout, 'capture-timeout agent started in case 23');
+      const timeoutOutcome = await waitFor(
+        () => {
+          const error = timeout.client._scanMessages((message) => message.t === 'error', timeout.mark.messages);
+          if (error) return { kind: 'error', error };
+          if (timeout.client.closed) return { kind: 'closed' };
+          return false;
+        },
+        { timeoutMs: 15000, intervalMs: 100, label: 'capture timeout to surface on the WebSocket' },
+      );
+      const timeoutElapsed = Date.now() - timeout.startedAt;
+      assertEqual(timeoutOutcome.kind, 'error', 'capture timeout must be reported as a WS error');
+      assertEqual(timeoutOutcome.error.code, 'no_screen', 'capture timeout error code');
+      assertIncludes(timeoutOutcome.error.message, 'timed out', 'capture timeout error message');
+      assert(
+        timeoutElapsed >= 9000,
+        `capture timeout must happen after the ~10s backend timeout, saw it after ${timeoutElapsed}ms`,
+      );
+      assert(
+        timeout.instance.proc.exitCode === null && timeout.instance.proc.signalCode === null,
+        'agent must stay alive after capture timeout',
+      );
+      assertEqual((await timeout.instance.http.request('/health')).status, 200, 'timeout agent /health after timeout');
+
+      // Fault agents must shut down gracefully and leave no helper behind.
+      assertEqual(await stopWin32Agent(crashWin), 0, 'crash agent SIGINT exit code');
+      assertEqual(await stopWin32Agent(badWin), 0, 'bad-json agent SIGINT exit code');
+      assertEqual(await stopWin32Agent(timeout.instance), 0, 'timeout agent SIGINT exit code');
+    });
+
+    await testCase('27 win32 cleanup: SIGINT exits the win32 Agent, fake helpers leave no residue', async () => {
+      const main = ctx.win32.main;
+      assert(main, 'win32 main agent from case 23');
+      assertEqual((await main.http.request('/health')).status, 200, 'win32 /health before cleanup');
+      assertEqual(await stopWin32Agent(main), 0, 'win32 agent SIGINT exit code');
+      await waitFor(async () => !(await isPortOpen(main.port)), {
+        timeoutMs: 8000,
+        intervalMs: 100,
+        label: `win32 agent port ${main.port} closed`,
+      });
+      assert(!(await isPortOpen(main.port)), `win32 agent port ${main.port} must be closed`);
+      assertEqual(findHelperPids(main.helperLog), [], 'no fake helper process may remain for the main win32 agent');
+      for (const agent of ctx.win32.agents) {
+        assert(
+          agent.proc.exitCode !== null || agent.proc.signalCode !== null,
+          `win32 agent "${agent.label}" must have exited`,
+        );
+        assertEqual(findHelperPids(agent.helperLog), [], `no fake helper process may remain for "${agent.label}"`);
+      }
+    });
   } finally {
     // ---- teardown (always runs) -----------------------------------------
     for (const client of ctx.clients) {
@@ -1363,6 +1825,26 @@ async function main() {
       } catch {
         /* ignore */
       }
+    }
+    // Win32 test Agents (and their fake helper children) must never outlive the
+    // suite, even when a case failed halfway through.
+    for (const agent of ctx.win32.agents) {
+      if (agent.proc.exitCode === null && agent.proc.signalCode === null) {
+        try {
+          process.kill(agent.proc.pid, 'SIGTERM');
+        } catch {
+          /* already gone */
+        }
+        if (!(await waitForExit(agent.proc, 5000))) {
+          try {
+            process.kill(agent.proc.pid, 'SIGKILL');
+          } catch {
+            /* already gone */
+          }
+          await waitForExit(agent.proc, 2000);
+        }
+      }
+      forceKillHelpersFor(agent.helperLog);
     }
 
     // ---- summary ---------------------------------------------------------

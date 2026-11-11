@@ -74,7 +74,7 @@ Agent ──fs────────▶ 本机文件系统（受 fs-root 限�
 
 ```jsonc
 {"t":"hello","client":"remote-desktop-web","version":1}          // 必须第一条；Agent 回 welcome
-{"t":"screen.start","fps":15,"tile":64,"quality":"auto"}         // 订阅屏幕；Agent 先发 keyframe
+{"t":"screen.start","fps":15,"tile":64,"quality":65}             // 订阅屏幕；Agent 先发 keyframe；quality 30..90（默认 65，仅 JPEG 后端生效）
 {"t":"screen.stop"}
 {"t":"screen.refresh"}                                           // 请求一次完整 keyframe
 {"t":"mouse","action":"move|down|up","x":640.0,"y":400.0,"button":0} // button 0=左 1=中 2=右（down/up 时有效）
@@ -110,16 +110,22 @@ Agent ──fs────────▶ 本机文件系统（受 fs-root 限�
 
 ### 3.3 屏幕帧（二进制）
 
-header JSON：
+header JSON（两种编码，`encoding` 缺省视为 `tiles`）：
 
 ```json
-{"t":"frame","seq":42,"width":1280,"height":800,"keyframe":false,
+{"t":"frame","seq":42,"width":1280,"height":800,"keyframe":false,"encoding":"tiles",
  "cursor":{"x":640,"y":400,"buttons":0},
  "tiles":[{"x":0,"y":0,"w":64,"h":64,"off":0,"len":512}],
  "payloadLen":512}
 ```
 
-- `payload` = 所有瓦片按 `tiles` 顺序拼接；每块是 `zlib deflate`（RFC1950，浏览器 `DecompressionStream('deflate')` 可解）压缩的 RGBA 像素：`w*h*4` 字节，行优先，每像素 R,G,B,A。
+```json
+{"t":"frame","seq":43,"width":1920,"height":1080,"keyframe":true,"encoding":"jpeg",
+ "cursor":{"x":640,"y":400,"buttons":0},"payloadLen":183456}
+```
+
+- `encoding:"tiles"`（Linux/X11 后端）：`payload` = 所有瓦片按 `tiles` 顺序拼接；每块是 `zlib deflate`（RFC1950，浏览器 `DecompressionStream('deflate')` 可解）压缩的 RGBA 像素：`w*h*4` 字节，行优先，每像素 R,G,B,A。
+- `encoding:"jpeg"`（Windows 后端）：`payload` 是一整帧 JPEG 字节（`FFD8…FFD9`），无 `tiles`，客户端用 `createImageBitmap` 解码后整帧绘制；此类帧总是全帧（`keyframe` 视为 true），`quality` 由 `screen.start` 指定。
 - 瓦片网格：Agent 把屏幕切成 `tile x tile` 的网格（最后一列/行可小于 tile）；只有内容变化的瓦片才发送（与上一帧比较）。`keyframe:true` 时发送全部瓦片。客户端以 `seq` 单调递增判断丢帧，直接在当前画布上覆盖绘制即可（瓦片互不重叠）。
 - `cursor`：X 指针位置（屏幕像素，整数）与按下的按钮掩码（X11 mask：1=左 2=中 4=右…）。客户端自行绘制光标。
 - 背压：Agent 在 `ws.bufferedAmount > 4MB` 时跳过本帧（不发送），下一帧仍在最新状态上做差。客户端无需处理"缺帧"。
@@ -149,6 +155,7 @@ header：`{"t":"shell.data","stream":"stdout"|"stderr"}`，payload 为原始字�
 - 指针：`QueryPointer` 每帧读取根坐标与按钮掩码。
 - 输入：XTest 扩展（`QueryExtension("XTEST")` + `FakeInput`），wire 格式见 `docs/X11-NOTES.md`。
 - 无 X / 无 XTEST：按能力位上报 `capabilities.screen=false` / `input=false`，其他功能（shell/files）照常。
+- **Windows 后端**：不使用 X11；由 `agent/windows/capture-input.ps1`（PowerShell 5.1 + 内联 C#）提供 GDI 截屏（JPEG，主显示器）与 SendInput 注入（物理扫描码 + Unicode），Node 侧 `agent/lib/backend-win32.mjs` 以 JSON Lines 契约驱动它，详见 `docs/WINDOWS.md`。客户端通过 `encoding:"jpeg"` 兼容。
 
 ## 6. Agent CLI
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // remote-agent — zero-dependency remote desktop agent.
 //
-// Implements the agent side of docs/PROTOCOL.md:
+// Implements the agent side of docs/PROTOCOL.md on top of a platform backend
+// (docs/WINDOWS.md):
 //   * HTTP API: /health, /api/auth, /api/info, /api/fs/*
 //   * WebSocket /ws: one remote session per connection (screen, input, shell)
-//   * X11 screen capture + XTEST input through ./lib/x11|capture|input.mjs
+//   * backend: Linux/X11 tiles (backend-x11.mjs) or Windows JPEG via helper
+//     process (backend-win32.mjs)
 //
 // Run `node agent/remote-agent.mjs --help` for the CLI.
 
@@ -19,21 +21,21 @@ import { attachWebSocketServer } from './lib/ws.mjs';
 import { AuthService, HttpApi } from './lib/http.mjs';
 import { FileService } from './lib/files.mjs';
 import { ShellSession } from './lib/shell.mjs';
+import { createBackend } from './lib/backend.mjs';
 
 const PROTOCOL_VERSION = 1;
 const AGENT_VERSION = '1.0.0';
 const AGENT_NAME = os.hostname();
-const PLATFORM = process.platform;
 
 const DEFAULT_PORT = 38080;
 const DEFAULT_BIND = '0.0.0.0';
 const DEFAULT_TOKEN_TTL_HOURS = 12;
+const DEFAULT_QUALITY = 65;
 const MAX_FRAME_PAYLOAD = 12 * 1024 * 1024;
 const MAX_BUFFERED_AMOUNT = 4 * 1024 * 1024;
 const MAX_WS_TEXT_BYTES = 4 * 1024 * 1024;
 const IDLE_TIMEOUT_MS = 30_000;
 const IDLE_CHECK_INTERVAL_MS = 5_000;
-const XDOTOOL_CANDIDATES = ['/usr/bin/xdotool', '/usr/local/bin/xdotool'];
 
 let quiet = false;
 
@@ -57,7 +59,7 @@ Options:
   --bind <addr>          listen address (default ${DEFAULT_BIND})
   --password <p>         access password (or REMOTE_AGENT_PASSWORD, or --password-file)
   --password-file <path> read the access password from a file
-  --display <:n>         X11 display (default $DISPLAY or :0)
+  --display <:n>         X11 display (default $DISPLAY or :0; ignored on Windows)
   --fs-root <dir>        root directory for the file API (default $HOME)
   --no-screen            disable screen capture and input
   --no-shell             disable the remote shell
@@ -206,21 +208,23 @@ function expandHome(input) {
   return input;
 }
 
-function hasXdotool() {
-  for (const candidate of XDOTOOL_CANDIDATES) {
-    try {
-      if (fs.existsSync(candidate)) return true;
-    } catch {
-      /* ignore */
-    }
-  }
-  return false;
-}
-
 function clampInt(value, min, max, fallback) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+function normalizePlatformName(platform) {
+  return platform === 'win32' ? 'win32' : 'linux';
+}
+
+// `RDA_HELPER_CMD` is the documented testing hook that makes a non-Windows
+// host exercise the win32 backend; on a real Windows host process.platform is
+// already 'win32'.
+function detectPlatform() {
+  const helperCommand = process.env.RDA_HELPER_CMD;
+  if (typeof helperCommand === 'string' && helperCommand.trim() !== '') return 'win32';
+  return process.platform;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,15 +239,15 @@ class ClientSession {
     this.closed = false;
     this.helloReceived = false;
 
-    this.x11 = null;
-    this.capture = null;
-    this.input = null;
+    this.backend = null;
+    this.backendInfo = null;
     this.screenReady = false;
     this.screenError = null;
 
     this.screenActive = false;
     this.fps = 15;
     this.tile = 64;
+    this.quality = DEFAULT_QUALITY;
     this._screenTimer = null;
     this._forceKeyframe = false;
     this._tickPending = false;
@@ -262,38 +266,29 @@ class ClientSession {
   }
 
   async _init() {
-    if (!this.ctx.screenEnabled || !this.ctx.modules) return;
+    if (!this.ctx.screenEnabled) return;
+    let backend = null;
     try {
-      const { X11Display, ScreenCapture, InputController } = this.ctx.modules;
-      const x11 = await X11Display.connect({ display: this.ctx.display });
+      backend = await this.ctx.createBackend();
       if (this.closed) {
         try {
-          x11.close();
+          await backend.close();
         } catch {
           /* ignore */
         }
         return;
       }
-      this.x11 = x11;
-      this.capture = new ScreenCapture(x11, { tile: this.tile });
-      if (this.ctx.inputCapable) {
-        try {
-          this.input = new InputController(x11);
-        } catch (err) {
-          this.input = null;
-          logWarn(`input controller unavailable: ${err && err.message ? err.message : err}`);
-        }
-      }
-      this.screenReady = true;
+      this.backend = backend;
+      this.backendInfo = backend.info || {};
+      this.screenReady = Boolean(backend.capabilities && backend.capabilities.screen && this.backendInfo.screen);
     } catch (err) {
       this.screenError = err && err.message ? err.message : String(err);
-      if (this.x11) {
+      if (backend) {
         try {
-          this.x11.close();
+          await backend.close();
         } catch {
           /* ignore */
         }
-        this.x11 = null;
       }
     }
   }
@@ -375,19 +370,11 @@ class ClientSession {
         this._handleScreenRefresh();
         return;
       case 'mouse':
-        await this._handleMouse(msg);
-        return;
       case 'wheel':
-        await this._handleWheel(msg);
-        return;
       case 'key':
-        await this._handleKey(msg);
-        return;
       case 'text':
-        await this._handleText(msg);
-        return;
       case 'releaseAll':
-        await this._handleReleaseAll();
+        this._handleInputMessage(msg);
         return;
       case 'shell.start':
         await this._handleShellStart(msg);
@@ -412,25 +399,26 @@ class ClientSession {
 
   _handleHello() {
     this.helloReceived = true;
-    const caps = this.capabilities();
     this._send({
       t: 'welcome',
       protocol: PROTOCOL_VERSION,
       session: this.sessionId,
-      agent: { name: AGENT_NAME, version: AGENT_VERSION, platform: PLATFORM },
-      screen: this.screenReady ? { width: this.x11.width, height: this.x11.height, depth: this.x11.depth } : null,
-      capabilities: caps,
+      agent: { name: AGENT_NAME, version: AGENT_VERSION, platform: this.ctx.platform },
+      screen: this.backendInfo && this.backendInfo.screen ? { ...this.backendInfo.screen } : null,
+      capabilities: this.capabilities(),
       fsRoot: this.ctx.fsRootDisplay,
     });
   }
 
   capabilities() {
+    const backendCaps = (this.backend && this.backend.capabilities) || {};
+    const screen = Boolean(this.screenReady && backendCaps.screen);
     return {
-      screen: this.screenReady,
-      input: Boolean(this.screenReady && this.input && this.ctx.inputCapable),
+      screen,
+      input: Boolean(screen && backendCaps.input),
       shell: this.ctx.shellEnabled,
       files: this.ctx.filesEnabled,
-      text: Boolean(this.screenReady && this.ctx.inputCapable && this.ctx.textCapable),
+      text: Boolean(screen && backendCaps.text),
     };
   }
 
@@ -441,24 +429,15 @@ class ClientSession {
       this._sendError('no_screen', 'screen capture is disabled on this agent');
       return;
     }
-    if (!this.screenReady) {
+    if (!this.screenReady || !this.backend) {
       this._sendError('no_screen', this.screenError || 'screen capture is unavailable');
       return;
     }
-    const fps = clampInt(msg.fps, 1, 30, 15);
-    const tile = clampInt(msg.tile, 8, 256, 64);
-    this.fps = fps;
+    this.fps = clampInt(msg.fps, 1, 30, 15);
+    this.tile = clampInt(msg.tile, 8, 256, 64);
+    this.quality = clampInt(msg.quality, 30, 90, DEFAULT_QUALITY);
 
-    if (tile !== this.tile || !this.capture) {
-      this.tile = tile;
-      try {
-        this.capture = new this.ctx.modules.ScreenCapture(this.x11, { tile });
-      } catch (err) {
-        this._sendError('no_screen', `cannot create screen capture: ${err && err.message ? err.message : err}`);
-        return;
-      }
-    }
-
+    const screenInfo = (this.backendInfo && this.backendInfo.screen) || {};
     this._forceKeyframe = true;
     this._lastCursor = null;
     this._frameCount = 0;
@@ -469,14 +448,14 @@ class ClientSession {
       t: 'screen.started',
       fps: this.fps,
       tile: this.tile,
-      width: this.x11.width,
-      height: this.x11.height,
+      width: Number(screenInfo.width) || 0,
+      height: Number(screenInfo.height) || 0,
     });
     this._rescheduleScreen(0);
   }
 
   _handleScreenRefresh() {
-    if (!this.screenReady) {
+    if (!this.screenReady || !this.backend) {
       this._sendError('no_screen', this.screenError || 'screen capture is unavailable');
       return;
     }
@@ -518,7 +497,7 @@ class ClientSession {
   }
 
   async _screenTick() {
-    if (this.closed || !this.screenActive || !this.capture) return;
+    if (this.closed || !this.screenActive || !this.backend) return;
     if (this.grabbing) {
       this._tickPending = true;
       return;
@@ -535,35 +514,17 @@ class ClientSession {
     this._forceKeyframe = false;
 
     try {
-      if (keyframeRequested) this.capture.forceKeyframe();
-      const result = await this.capture.grab();
+      const frame = await this.backend.grab({
+        quality: this.quality,
+        tile: this.tile,
+        forceKeyframe: keyframeRequested,
+      });
       if (this.closed || !this.screenActive) return;
 
-      const cursor = result.cursor || { x: 0, y: 0, mask: 0 };
-      const cursorChanged =
-        !this._lastCursor ||
-        this._lastCursor.x !== cursor.x ||
-        this._lastCursor.y !== cursor.y ||
-        this._lastCursor.mask !== cursor.mask;
-      const geometryChanged = this._lastWidth !== this.x11.width || this._lastHeight !== this.x11.height;
-
-      if (this.conn.bufferedAmount > MAX_BUFFERED_AMOUNT) {
-        // The diff state has advanced without the client seeing it; recover
-        // with a full keyframe once backpressure clears.
-        this._forceKeyframe = true;
-      } else if (result.tiles.length > 0) {
-        const keyframe = keyframeRequested || geometryChanged || this._frameCount === 0;
-        this._lastWidth = this.x11.width;
-        this._lastHeight = this.x11.height;
-        if (this._sendScreenFrame(result.tiles, cursor, keyframe)) {
-          this._lastCursor = { x: cursor.x, y: cursor.y, mask: cursor.mask };
-          this._frameCount += 1;
-        }
-      } else if (cursorChanged) {
-        if (this._sendScreenFrame([], cursor, false)) {
-          this._lastCursor = { x: cursor.x, y: cursor.y, mask: cursor.mask };
-          this._frameCount += 1;
-        }
+      if (frame && frame.encoding === 'jpeg') {
+        this._handleJpegFrame(frame);
+      } else {
+        this._handleTileFrame(frame, keyframeRequested);
       }
     } catch (err) {
       if (!this.closed) {
@@ -584,7 +545,73 @@ class ClientSession {
     }
   }
 
-  _sendScreenFrame(tiles, cursor, keyframe) {
+  _cursorOf(frame) {
+    const source = (frame && frame.cursor) || {};
+    return {
+      x: Number.isFinite(Number(source.x)) ? Number(source.x) : 0,
+      y: Number.isFinite(Number(source.y)) ? Number(source.y) : 0,
+      buttons: Number.isFinite(Number(source.buttons)) ? Number(source.buttons) : 0,
+    };
+  }
+
+  _cursorChanged(cursor) {
+    return (
+      !this._lastCursor ||
+      this._lastCursor.x !== cursor.x ||
+      this._lastCursor.y !== cursor.y ||
+      this._lastCursor.buttons !== cursor.buttons
+    );
+  }
+
+  _handleTileFrame(frame, keyframeRequested) {
+    if (!frame) return;
+    const width = Number(frame.width) || (this.backendInfo && this.backendInfo.screen ? this.backendInfo.screen.width : 0);
+    const height = Number(frame.height) || (this.backendInfo && this.backendInfo.screen ? this.backendInfo.screen.height : 0);
+    const cursor = this._cursorOf(frame);
+    const cursorChanged = this._cursorChanged(cursor);
+    const geometryChanged = this._lastWidth !== width || this._lastHeight !== height;
+    const tiles = Array.isArray(frame.tiles) ? frame.tiles : [];
+
+    if (this.conn.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+      // The diff state has advanced without the client seeing it; recover with
+      // a full keyframe once backpressure clears.
+      this._forceKeyframe = true;
+      return;
+    }
+    if (tiles.length > 0) {
+      const keyframe = keyframeRequested || geometryChanged || this._frameCount === 0;
+      this._lastWidth = width;
+      this._lastHeight = height;
+      if (this._sendTileFrame(width, height, cursor, tiles, keyframe)) {
+        this._lastCursor = cursor;
+        this._frameCount += 1;
+      }
+    } else if (cursorChanged) {
+      if (this._sendTileFrame(width, height, cursor, [], false)) {
+        this._lastCursor = cursor;
+        this._frameCount += 1;
+      }
+    }
+  }
+
+  _handleJpegFrame(frame) {
+    if (!frame || !frame.data) return;
+    const width = Number(frame.width) || (this.backendInfo && this.backendInfo.screen ? this.backendInfo.screen.width : 0);
+    const height = Number(frame.height) || (this.backendInfo && this.backendInfo.screen ? this.backendInfo.screen.height : 0);
+    const cursor = this._cursorOf(frame);
+    if (this.conn.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+      // Every JPEG grab is a complete frame; simply skip this one.
+      return;
+    }
+    if (this._sendJpegFrame(width, height, cursor, frame.data)) {
+      this._lastWidth = width;
+      this._lastHeight = height;
+      this._lastCursor = cursor;
+      this._frameCount += 1;
+    }
+  }
+
+  _sendTileFrame(width, height, cursor, tiles, keyframe) {
     const parts = [];
     const metas = [];
     let offset = 0;
@@ -608,10 +635,11 @@ class ClientSession {
     const header = {
       t: 'frame',
       seq: this._seq,
-      width: this.x11.width,
-      height: this.x11.height,
+      width,
+      height,
       keyframe: Boolean(keyframe),
-      cursor: { x: cursor.x, y: cursor.y, buttons: cursor.mask },
+      encoding: 'tiles',
+      cursor: { x: cursor.x, y: cursor.y, buttons: cursor.buttons },
       tiles: metas,
       payloadLen: payload.length,
     };
@@ -622,124 +650,48 @@ class ClientSession {
     return false;
   }
 
-  // ---- input ---------------------------------------------------------------
-
-  _inputReady() {
-    if (!this.screenReady || !this.input || !this.ctx.inputCapable) {
-      this._sendError('no_screen', 'input injection is unavailable');
+  _sendJpegFrame(width, height, cursor, jpeg) {
+    if (!Buffer.isBuffer(jpeg) || jpeg.length === 0) return false;
+    if (jpeg.length > MAX_FRAME_PAYLOAD) {
+      this._sendError('internal', 'JPEG frame exceeds the maximum payload size');
       return false;
     }
-    return true;
+    const header = {
+      t: 'frame',
+      seq: this._seq,
+      width,
+      height,
+      keyframe: true,
+      encoding: 'jpeg',
+      cursor: { x: cursor.x, y: cursor.y, buttons: cursor.buttons },
+      payloadLen: jpeg.length,
+    };
+    if (this._sendBinaryHeader(header, jpeg)) {
+      this._seq += 1;
+      return true;
+    }
+    return false;
   }
 
-  async _handleMouse(msg) {
-    if (!this._inputReady()) return;
-    if (msg.action !== 'move' && msg.action !== 'down' && msg.action !== 'up') {
-      this._sendError('bad_request', 'mouse.action must be move, down or up');
-      return;
-    }
-    if (!Number.isFinite(Number(msg.x)) || !Number.isFinite(Number(msg.y))) {
-      this._sendError('bad_request', 'mouse.x and mouse.y must be numbers');
-      return;
-    }
-    await this._applyInput(
-      () => this.input.handleMouse({ action: msg.action, x: Number(msg.x), y: Number(msg.y), button: msg.button }),
-      ['bad_coordinates', 'bad_button', 'bad_action'],
-    );
-  }
+  // ---- input ---------------------------------------------------------------
 
-  async _handleWheel(msg) {
-    if (!this._inputReady()) return;
-    const dx = Number(msg.dx);
-    const dy = Number(msg.dy);
-    if (!Number.isFinite(dx) && !Number.isFinite(dy)) {
-      this._sendError('bad_request', 'wheel.dx/dy must be numbers');
+  _handleInputMessage(msg) {
+    if (!this.screenReady || !this.backend) {
+      this._sendError('no_screen', 'input injection is unavailable');
       return;
     }
-    await this._applyInput(() =>
-      this.input.handleWheel({ dx: Number.isFinite(dx) ? dx : 0, dy: Number.isFinite(dy) ? dy : 0 }),
-    );
-  }
-
-  async _handleKey(msg) {
-    if (!this._inputReady()) return;
-    if (typeof msg.down !== 'boolean') {
-      this._sendError('bad_request', 'key.down must be a boolean');
-      return;
-    }
-    if (typeof msg.code !== 'string' && typeof msg.key !== 'string') {
-      this._sendError('bad_request', 'key.code or key.key is required');
-      return;
-    }
-    await this._applyInput(() =>
-      this.input.handleKey({ code: msg.code, key: msg.key, down: msg.down, mods: msg.mods }),
-    );
-  }
-
-  async _handleText(msg) {
-    if (!this._inputReady()) return;
-    if (typeof msg.text !== 'string') {
-      this._sendError('bad_request', 'text.text must be a string');
-      return;
-    }
-    await this._applyInput(() => this.input.handleText(msg.text));
-  }
-
-  async _handleReleaseAll() {
-    if (!this.screenReady || !this.input) return;
-    try {
-      this.input.releaseAll();
-      await this._flushInput();
-    } catch {
-      /* best effort */
-    }
-  }
-
-  // InputController methods are synchronous and report failure as {ok:false,
-  // error} instead of throwing; map that to the protocol error codes.
-  async _applyInput(action, badRequestCodes = []) {
     let result;
     try {
-      result = action();
+      result = this.backend.handleInput(msg);
     } catch (err) {
-      this._sendInputError(err);
+      logWarn(`session ${this.sessionId}: input error: ${err && err.message ? err.message : err}`);
       return;
     }
-    if (result && result.ok === false) {
-      const error = result.error || 'internal';
-      if (error === 'unsupported_key') {
-        this._sendError('unsupported_key', 'key is not supported by the X keymap');
-      } else if (error === 'disposed') {
-        this._sendError('no_screen', 'input controller is not available');
-      } else if (badRequestCodes.includes(error) || String(error).startsWith('bad_')) {
-        this._sendError('bad_request', String(error));
-      } else {
-        this._sendError('internal', String(error));
-      }
+    if (result && result.ok === false && result.error === 'unsupported_key') {
+      this._sendError('unsupported_key', 'key is not supported by the remote platform');
     }
-    try {
-      await this._flushInput();
-    } catch (err) {
-      this._sendInputError(err);
-    }
-  }
-
-  async _flushInput() {
-    if (this.x11 && typeof this.x11.flush === 'function') {
-      await this.x11.flush();
-    }
-  }
-
-  _sendInputError(err) {
-    const message = err && err.message ? err.message : String(err);
-    const code = err && err.code ? String(err.code) : '';
-    if (code === 'unsupported_key' || /unsupported|no keysym|unknown key/i.test(message)) {
-      this._sendError('unsupported_key', message);
-    } else if (code === 'no_input' || /XTEST/i.test(message)) {
-      this._sendError('no_screen', message);
-    } else {
-      this._sendError('internal', message);
-    }
+    // Other input failures are intentionally ignored: input must not break the
+    // session (docs/WINDOWS.md, PROTOCOL.md §7).
   }
 
   // ---- shell ---------------------------------------------------------------
@@ -848,41 +800,23 @@ class ClientSession {
         shellExit = Promise.resolve();
       }
     }
-    if (this.input) {
-      try {
-        this.input.releaseAll();
-      } catch {
-        /* ignore */
-      }
-      if (typeof this.input.dispose === 'function') {
-        try {
-          this.input.dispose();
-        } catch {
-          /* ignore */
-        }
-      }
-      this.input = null;
+
+    const backend = this.backend;
+    this.backend = null;
+    if (!backend) {
+      return shellExit.then(() => undefined).catch(() => undefined);
     }
-    if (this.x11) {
-      const x11 = this.x11;
-      this.x11 = null;
-      // Give the last input bytes a chance to reach the server before closing.
-      const close = async () => {
-        try {
-          if (typeof x11.flush === 'function') await x11.flush();
-        } catch {
-          /* ignore */
-        }
-        try {
-          x11.close();
-        } catch {
-          /* ignore */
-        }
-      };
-      return Promise.allSettled([close(), shellExit]).then(() => undefined);
+    // Release every pressed key/button before tearing the backend down so the
+    // remote desktop never gets stuck keys after a disconnect.
+    try {
+      backend.handleInput({ t: 'releaseAll' });
+    } catch {
+      /* ignore */
     }
-    this.capture = null;
-    return shellExit.then(() => undefined).catch(() => undefined);
+    const closeBackend = Promise.resolve()
+      .then(() => backend.close())
+      .catch(() => undefined);
+    return Promise.allSettled([closeBackend, shellExit]).then(() => undefined);
   }
 }
 
@@ -890,48 +824,10 @@ class ClientSession {
 // Startup
 // ---------------------------------------------------------------------------
 
-async function loadScreenModules(display) {
-  let x11mod;
-  let captureMod;
-  let inputMod;
-  try {
-    x11mod = await import('./lib/x11.mjs');
-    captureMod = await import('./lib/capture.mjs');
-    inputMod = await import('./lib/input.mjs');
-  } catch (err) {
-    logWarn(`screen/input modules unavailable (${err && err.message ? err.message : err}); continuing without screen`);
-    return { modules: null, screenInfo: null, inputCapable: false, x11Error: err };
-  }
-  if (!x11mod || !x11mod.X11Display || !captureMod || !captureMod.ScreenCapture || !inputMod || !inputMod.InputController) {
-    logWarn('screen/input modules are incomplete; continuing without screen');
-    return { modules: null, screenInfo: null, inputCapable: false };
-  }
-
-  let probe;
-  try {
-    probe = await x11mod.X11Display.connect({ display });
-  } catch (err) {
-    logWarn(`cannot connect to X display ${display} (${err && err.message ? err.message : err}); continuing without screen`);
-    return {
-      modules: { X11Display: x11mod.X11Display, ScreenCapture: captureMod.ScreenCapture, InputController: inputMod.InputController },
-      screenInfo: null,
-      inputCapable: false,
-    };
-  }
-
-  const screenInfo = { width: probe.width, height: probe.height, depth: probe.depth };
-  const inputCapable = probe.xtestOpcode !== 0;
-  if (!inputCapable) logWarn('X server does not provide the XTEST extension; input injection is disabled');
-  try {
-    probe.close();
-  } catch {
-    /* ignore */
-  }
-  return {
-    modules: { X11Display: x11mod.X11Display, ScreenCapture: captureMod.ScreenCapture, InputController: inputMod.InputController },
-    screenInfo,
-    inputCapable,
-  };
+function formatScreenInfo(screenInfo) {
+  if (!screenInfo) return 'unavailable';
+  const size = `${screenInfo.width}x${screenInfo.height}`;
+  return screenInfo.depth ? `${size}x${screenInfo.depth}` : size;
 }
 
 async function main() {
@@ -987,6 +883,8 @@ async function main() {
   const bind = opts.bindExplicit ? opts.bind : password === null ? '127.0.0.1' : DEFAULT_BIND;
   const display = opts.display || process.env.DISPLAY || ':0';
   const tokenTtlMs = Math.round(opts.tokenTtlHours * 60 * 60 * 1000);
+  const requestedPlatform = detectPlatform();
+  const platform = normalizePlatformName(requestedPlatform);
 
   // ---- filesystem ---------------------------------------------------------
   let fsRoot = null;
@@ -1008,51 +906,78 @@ async function main() {
     }
   }
 
-  // ---- screen / input -----------------------------------------------------
+  // ---- screen / input backend --------------------------------------------
+  const backendOptions = {
+    display,
+    noScreen: opts.noScreen,
+    noInput: false,
+    env: process.env,
+    platform: requestedPlatform,
+  };
   let screenEnabled = false;
   let screenInfo = null;
-  let inputCapable = false;
-  let modules = null;
+  let backendCapabilities = { screen: false, input: false, text: false };
+  let backendHelper = null;
+
   if (!opts.noScreen) {
-    const loaded = await loadScreenModules(display);
-    modules = loaded.modules;
-    inputCapable = loaded.inputCapable;
-    screenEnabled = loaded.screenInfo !== null && modules !== null;
-    screenInfo = loaded.screenInfo;
+    let probe = null;
+    try {
+      probe = await createBackend(backendOptions);
+      backendCapabilities = probe.capabilities || backendCapabilities;
+      screenInfo = (probe.info && probe.info.screen) || null;
+      backendHelper = (probe.info && probe.info.helper) || null;
+      screenEnabled = Boolean(screenInfo);
+    } catch (err) {
+      logWarn(`screen backend unavailable (${err && err.message ? err.message : err}); continuing without screen`);
+    } finally {
+      if (probe) {
+        try {
+          await probe.close();
+        } catch {
+          /* ignore */
+        }
+      }
+    }
   } else {
     log('screen capture disabled by --no-screen');
   }
-  const textCapable = inputCapable && hasXdotool();
 
-  // ---- services -----------------------------------------------------------
-  const auth = new AuthService({ password, tokenTtlMs, maxFailuresPerMinute: 5 });
   const capabilities = {
     screen: screenEnabled,
-    input: screenEnabled && inputCapable,
+    input: screenEnabled && Boolean(backendCapabilities.input),
     shell: !opts.noShell,
     files: !opts.noFiles,
-    text: screenEnabled && textCapable,
+    text: screenEnabled && Boolean(backendCapabilities.text),
   };
   const infoProvider = () => ({
-    agent: { name: AGENT_NAME, version: AGENT_VERSION, platform: PLATFORM },
-    screen: screenInfo ? { width: screenInfo.width, height: screenInfo.height, depth: screenInfo.depth } : null,
+    agent: { name: AGENT_NAME, version: AGENT_VERSION, platform },
+    screen: screenInfo ? { ...screenInfo } : null,
     capabilities: { ...capabilities },
     fsRoot,
     protocol: PROTOCOL_VERSION,
   });
+
+  // ---- services -----------------------------------------------------------
+  const auth = new AuthService({ password, tokenTtlMs, maxFailuresPerMinute: 5 });
   const api = new HttpApi({ auth, fileService, infoProvider, corsOrigin: '*' });
 
   const context = {
+    platform,
     display,
     fsRootDisplay: fsRoot,
     filesEnabled: !opts.noFiles,
     shellEnabled: !opts.noShell,
     screenEnabled,
-    inputCapable,
-    textCapable,
-    modules,
     shellEnv: undefined,
     sessions: new Set(),
+    createBackend: () =>
+      createBackend({
+        display,
+        noScreen: false,
+        noInput: false,
+        env: process.env,
+        platform: requestedPlatform,
+      }),
   };
 
   const server = http.createServer(async (req, res) => {
@@ -1142,7 +1067,7 @@ async function main() {
     }
     await Promise.race([
       Promise.allSettled(cleanupPromises),
-      new Promise((resolve) => setTimeout(resolve, 1500)),
+      new Promise((resolve) => setTimeout(resolve, 5000)),
     ]);
     await new Promise((resolve) => setTimeout(resolve, 200));
     process.exit(0);
@@ -1162,10 +1087,14 @@ async function main() {
 
   const address = server.address();
   const actualPort = address && typeof address === 'object' ? address.port : opts.port;
-  const shownBind = bind;
-  log(`listening on http://${shownBind}:${actualPort}  ws://${shownBind}:${actualPort}/ws`);
+  log(`listening on http://${bind}:${actualPort}  ws://${bind}:${actualPort}/ws`);
   if (screenInfo) {
-    log(`screen: ${screenInfo.width}x${screenInfo.height}x${screenInfo.depth} (display ${display})`);
+    if (platform === 'win32') {
+      const helperVersion = backendHelper && backendHelper.version ? `, helper ${backendHelper.version}` : '';
+      log(`screen: ${formatScreenInfo(screenInfo)} (win32 JPEG${helperVersion})`);
+    } else {
+      log(`screen: ${formatScreenInfo(screenInfo)} (display ${display})`);
+    }
   } else {
     log('screen: unavailable');
   }

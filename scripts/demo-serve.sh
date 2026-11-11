@@ -35,7 +35,7 @@ if [ -e "/tmp/.X${XDISPLAY#:}-lock" ]; then
   exit 1
 fi
 Xvfb "$XDISPLAY" -screen 0 1280x800x24 -nolisten tcp -noreset >/tmp/rd-demo-xvfb.log 2>&1 &
-echo "$!" > "$PIDS"
+echo "xvfb:$!" > "$PIDS"
 sleep 1
 DISPLAY="$XDISPLAY" xsetroot -solid '#1b2430'
 
@@ -44,7 +44,7 @@ DISPLAY="$XDISPLAY" xterm -geometry 104x30+40+40 -fa 'DejaVu Sans Mono' -fs 12 \
   -bg '#101820' -fg '#e6edf3' -T 'Remote demo host' \
   -e bash -lc "cd '$SANDBOX' && echo 'Remote demo host -- controlled through the DSH remote desktop panel.' && exec bash --noprofile --norc" \
   >/tmp/rd-demo-xterm.log 2>&1 &
-echo "$!" >> "$PIDS"
+echo "xterm:$!" >> "$PIDS"
 
 # Xvfb runs without a window manager, so nothing assigns keyboard focus on a click.
 # Focus the demo window explicitly when xdotool is available (real desktops do this
@@ -63,7 +63,7 @@ cd "$ROOT"
 node agent/remote-agent.mjs --port "$PORT" --bind 127.0.0.1 \
   --password "$PASSWORD" --display "$XDISPLAY" --fs-root "$SANDBOX" \
   >/tmp/rd-demo-agent.log 2>&1 &
-echo "$!" >> "$PIDS"
+echo "agent:$!" >> "$PIDS"
 
 for _ in $(seq 1 50); do
   if curl -s --noproxy '*' -m 1 "http://127.0.0.1:$PORT/health" | grep -q '"ok":true'; then break; fi

@@ -54,6 +54,7 @@ export class ShellSession {
     this.cols = clampInt(cols, 2, 500, 120);
     this.rows = clampInt(rows, 2, 500, 32);
     this.cwd = usableCwd(cwd) || process.cwd() || os.homedir();
+    this.platform = process.platform === 'win32' ? 'win32' : 'linux';
 
     this._dataHandlers = [];
     this._exitHandlers = [];
@@ -74,25 +75,37 @@ export class ShellSession {
       LINES: String(this.rows),
     };
 
-    const useScript = process.platform === 'linux' && fs.existsSync(SCRIPT_BIN);
     let command;
     let args;
-    if (useScript) {
-      command = SCRIPT_BIN;
-      args = ['-qfec', `${BASH_BIN} -i`, '/dev/null'];
-      this.pty = true;
-    } else {
-      command = BASH_BIN;
-      args = ['-i'];
-      this.pty = false;
-    }
-
-    this._child = spawn(command, args, {
+    const spawnOptions = {
       cwd: this.cwd,
       env: childEnv,
-      detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    };
+
+    if (this.platform === 'win32') {
+      // No PTY / no line echo in this mode: cmd.exe reads commands from stdin
+      // and writes their output to stdout. Known v1 limitation (docs/WINDOWS.md).
+      command = process.env.ComSpec || 'cmd.exe';
+      args = ['/Q', '/D'];
+      spawnOptions.detached = false;
+      spawnOptions.windowsHide = true;
+      this.pty = false;
+    } else {
+      const useScript = process.platform === 'linux' && fs.existsSync(SCRIPT_BIN);
+      if (useScript) {
+        command = SCRIPT_BIN;
+        args = ['-qfec', `${BASH_BIN} -i`, '/dev/null'];
+        this.pty = true;
+      } else {
+        command = BASH_BIN;
+        args = ['-i'];
+        this.pty = false;
+      }
+      spawnOptions.detached = true;
+    }
+
+    this._child = spawn(command, args, spawnOptions);
 
     this._child.stdout?.on('data', (chunk) => this._emitData(chunk, 'stdout'));
     this._child.stderr?.on('data', (chunk) => this._emitData(chunk, 'stderr'));
@@ -120,7 +133,13 @@ export class ShellSession {
   write(str) {
     if (this._exited || !this._child || !this._child.stdin) return false;
     try {
-      return this._child.stdin.write(String(str));
+      let text = String(str);
+      if (this.platform === 'win32') {
+        // cmd.exe reads command lines from the pipe; normalise CR/CRLF to LF
+        // so a client sending "dir\r" executes immediately.
+        text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      }
+      return this._child.stdin.write(text);
     } catch {
       return false;
     }
@@ -129,6 +148,38 @@ export class ShellSession {
   kill(signal = 'SIGTERM') {
     if (this._exited) return this._exitPromise;
     const pid = this.pid;
+
+    if (this.platform === 'win32') {
+      if (pid) {
+        try {
+          this._child.kill(signal);
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!this._killTimer) {
+        this._killTimer = setTimeout(() => {
+          this._killTimer = null;
+          if (this._exited) return;
+          const livePid = this.pid;
+          if (!livePid) return;
+          // Terminate the whole tree (cmd.exe and whatever it started).
+          try {
+            const killer = spawn('taskkill', ['/PID', String(livePid), '/T', '/F'], {
+              stdio: 'ignore',
+              windowsHide: true,
+            });
+            killer.on('error', () => {});
+            killer.unref?.();
+          } catch {
+            /* ignore */
+          }
+        }, KILL_ESCALATION_MS);
+        this._killTimer.unref?.();
+      }
+      return this._exitPromise;
+    }
+
     if (pid) {
       try {
         // Negative pid targets the whole detached process group: `script`, the
