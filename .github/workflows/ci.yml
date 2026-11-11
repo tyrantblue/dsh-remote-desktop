@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: e2e (Linux X11 + Windows fake helper)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install X11 test tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb x11-apps xterm x11-xserver-utils xdotool
+
+      - name: End-to-end suite (27 cases)
+        run: bash test/run.sh
+
+      - name: Windows static checks (PowerShell parse + inline C# compile when tools exist)
+        run: node test/static-checks.mjs
+
+  windows-zip:
+    name: package Windows agent zip
+    runs-on: ubuntu-latest
+    needs: e2e
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dsh-remote-desktop-windows.zip
+        run: bash scripts/package-windows-agent.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-remote-desktop-windows
+          path: dist/dsh-remote-desktop-windows.zip
+          if-no-files-found: error

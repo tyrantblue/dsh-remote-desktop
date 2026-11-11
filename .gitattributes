@@ -1,0 +1,6 @@
+# Keep Windows batch files byte-exact with CRLF line endings in every checkout
+# and archive (cmd.exe parses labels/goto more reliably with CRLF).
+*.bat -text
+*.cmd -text
+*.ps1 text eol=lf
+*.md text eol=lf

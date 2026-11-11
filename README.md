@@ -4,6 +4,8 @@
 
 **当前重点是被控端是 Windows 10/11**：把 `agent/` 拷到 Windows、双击 `agent/windows/start-agent.bat`（自动下载便携 Node、生成密码、打印连接信息），不需要安装 RDP/VNC、不改系统设置。Linux/X11 路径保留（纯 JS X11 实现，同时作为 E2E 回归环境）。
 
+仓库：**https://github.com/tyrantblue/dsh-remote-desktop**（Windows 一键安装、GitHub Releases 提供被控端 zip）
+
 参考了 [1Remote](https://github.com/1Remote/1Remote)（多协议远程会话管理器的产品结构）以及向日葵 / 网易 UU 远程这类软件的核心体验（一侧被控 Agent + 一侧控制端，低延迟画面 + 输入回传 + 文件/终端辅助面板）。区别在于：本项目把控制端直接做进 Harness Web UI，被控端是自研 Agent（Node 内核 + 平台采集/注入后端），不经过第三方服务器。
 
 ```
@@ -59,8 +61,21 @@
 
 ### 1. Windows 被控机（推荐）
 
-要求：Windows 10/11（自带 Windows PowerShell 5.1），已登录到桌面。把仓库里的 `agent/` 目录整个拷到 Windows 任意位置（例如 `D:\dsh-agent\agent`），**双击 `agent\windows\start-agent.bat`**：
+要求：Windows 10/11（自带 Windows PowerShell 5.1），已登录到桌面。
 
+**一键安装（推荐，不需要 git、不需要手动拷贝文件）**：在被控机按 `Win+R` 打开「运行」，粘贴下面这一行并回车（会弹出 PowerShell 窗口）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/tyrantblue/dsh-remote-desktop/main/agent/windows/install.ps1 | iex"
+```
+
+脚本会：从 GitHub 下载最新被控端 zip → 解压到 `%USERPROFILE%\dsh-remote-desktop` → 保留已生成的密码与便携 Node → 启动 `start-agent.bat`。之后每次启动只需双击桌面/目录里的 `start-agent.bat`。
+
+其他安装方式（任选其一）：
+- 打开 [Releases](https://github.com/tyrantblue/dsh-remote-desktop/releases) 下载 `dsh-remote-desktop-windows.zip`，解压后双击 `agent\windows\start-agent.bat`；
+- 已装 git：`git clone https://github.com/tyrantblue/dsh-remote-desktop.git` 后双击 `agent\windows\start-agent.bat`。
+
+启动后：
 1. 首次运行会自动下载便携版 Node.js 到 `agent\windows\node\`（无需安装 Node，不用管理员权限；离线时按提示手动放好 `node\node.exe`）。
 2. 自动生成 `agent-password.txt` 随机密码，并打印本机 IPv4 与连接方式。
 3. Windows 防火墙弹窗时选择「允许」（专用网络即可）；端口默认 38080。
@@ -91,7 +106,10 @@ node agent/remote-agent.mjs \
 插件包位于 `/opt/remote/plugin`，本机已安装到当前 `web` profile（`@local/remote-desktop`，bundle 已启用）。
 
 - 如果侧边栏还没出现「远程桌面」图标：刷新页面（Ctrl/Cmd+R）。新装的客户端插件通常会被 Harness 的 client HMR 热加载；刷新一定可以拿到最新版本。
-- 换一台 Harness 部署时重新安装：
+- 换一台 Harness 部署时重新安装（把插件代码拿到本地）：
+  ```bash
+  git clone https://github.com/tyrantblue/dsh-remote-desktop.git /opt/remote
+  ```
   ```
   plugin_manager action=install_bundle target=/opt/remote/plugin
   ```
@@ -166,6 +184,21 @@ bash /opt/remote/demo/run.sh     # 产出 demo/screenshot.png
 - 文件传输无进度条/断点续传；剪贴板双向同步、音频、多标签未实现。
 - 浏览器需支持 `createImageBitmap`、`DecompressionStream('deflate')`（Chrome/Edge 103+、Firefox 113+、Safari 16.4+）。
 - 插件页面视觉细节、Windows 真实运行（双击/截屏/注入/防火墙）无法在 Linux 自动验证：只做静态校验与 fake-helper 协议测试，见交付报告验证范围。
+
+## 开发与发布（GitHub）
+
+```bash
+# 本地验证：27 项 E2E（含 Windows fake-helper 协议用例）+ Windows 静态校验
+bash test/run.sh
+node test/static-checks.mjs
+
+# 打包 Windows 被控端发布物（GitHub Release 附件 / CI artifact）
+bash scripts/package-windows-agent.sh   # -> dist/dsh-remote-desktop-windows.zip
+```
+
+- CI（`.github/workflows/ci.yml`）在每次 push 上跑完整 E2E 并产出 `dsh-remote-desktop-windows` artifact。
+- 发布：打 tag 后在 GitHub Release 上传 `dist/dsh-remote-desktop-windows.zip`，`install.ps1` 会自动使用 `releases/latest/download/...` 地址。
+- `.bat` 使用 CRLF 行尾（`.gitattributes` 固定），GitHub 下载的 zip 里可直接双击运行。
 
 ## 与参考项目的关系
 
