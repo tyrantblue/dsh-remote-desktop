@@ -238,6 +238,21 @@ function cleanupDisplayArtifacts(displayNumber, ownerPid) {
  *   depth:number|null, hasXTEST:boolean, pid:number, proc:import('node:child_process').ChildProcess,
  *   socketPath:string, lockPath:string, logPath:string, stop:()=>Promise<void>}>}
  */
+/**
+ * Fail fast when the X11 probe tool is missing. Without `xdpyinfo` every
+ * readiness poll fails and every attempt eventually times out with a message
+ * that suggests the X server is broken, which is misleading.
+ */
+function assertXdpyinfoAvailable() {
+  const probe = spawnSync('xdpyinfo', ['-display', ':0'], { timeout: 3000, encoding: 'utf8' });
+  if (probe.error && probe.error.code === 'ENOENT') {
+    throw new Error(
+      'xdpyinfo not found on PATH: install the X11 utilities (Debian/Ubuntu: `apt-get install x11-utils`). ' +
+        'The E2E suite needs xdpyinfo to confirm that its private Xvfb is ready.',
+    );
+  }
+}
+
 export async function startXvfb({
   display = ':99',
   width = 1280,
@@ -248,6 +263,7 @@ export async function startXvfb({
   logDir = os.tmpdir(),
   timeoutMs = 15000,
 } = {}) {
+  assertXdpyinfoAvailable();
   const startNumber = parseDisplayNumber(display);
   fs.mkdirSync(logDir, { recursive: true });
 
