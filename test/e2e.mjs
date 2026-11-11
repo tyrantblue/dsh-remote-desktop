@@ -1111,6 +1111,7 @@ async function stopWin32Agent(instance, { timeoutMs = 10000 } = {}) {
 
       const keyframe = await client.waitForNewFrame((frame) => frame.keyframe && frame.tiles.length > 0, {
         label: 'keyframe',
+        mark,
       });
       ctx.screenStartedAt = Date.now();
       assertFrameTilesGrid(keyframe, 'keyframe');
@@ -1443,6 +1444,7 @@ async function stopWin32Agent(instance, { timeoutMs = 10000 } = {}) {
       try {
         keyframeB = await clientB.waitForNewFrame((frame) => frame.keyframe && frame.tiles.length > 0, {
           label: 'keyframe on B',
+          mark: markB,
         });
       } catch (error) {
         // Environment-specific diagnostics (CI runners have failed here): show what
@@ -1665,7 +1667,7 @@ async function stopWin32Agent(instance, { timeoutMs = 10000 } = {}) {
       // JPEG frames are always full frames and keep streaming with a growing seq.
       const second = await client.waitForNewFrame(
         (candidate) => candidate.encoding === 'jpeg' && candidate.seq > frame.seq,
-        { label: 'second win32 JPEG frame' },
+        { label: 'second win32 JPEG frame', mark },
       );
       assert(second.seq > frame.seq, 'jpeg frame seq must increase');
 
