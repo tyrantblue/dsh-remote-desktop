@@ -112,6 +112,57 @@ function checkPwshParse(psPath, label) {
   }
 }
 
+/**
+ * Compile the GUI's inline log-pump class from --dump-csharp with Mono.
+ *
+ * gui.ps1 must both define `$csharp` AND call `Add-Type -TypeDefinition $csharp`
+ * before `New-Object DsRemoteGuiLogPump`; a Windows user hit "cannot find type
+ * DsRemoteGuiLogPump" because only the dump path used the source. The markers
+ * check the call exists, and this check proves the source itself compiles under
+ * a .NET Framework-ish reference set (Mono mscorlib/System), like
+ * capture-input.ps1's inline C#.
+ */
+function checkGuiCsharpCompiles() {
+  if (!fs.existsSync(GUI_PS)) {
+    record('SKIP', 'gui.ps1 inline C# compiles', `missing ${GUI_PS}`);
+    return;
+  }
+  if (!fs.existsSync(PWSH)) {
+    record('SKIP', 'gui.ps1 inline C# compiles', `pwsh not available at ${PWSH}`);
+    return;
+  }
+  if (!fs.existsSync(MCS) && spawnSync('which', [MCS]).status !== 0) {
+    record('SKIP', 'gui.ps1 inline C# compiles', `mcs not available (${MCS})`);
+    return;
+  }
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rdtest-gui-'));
+  const csPath = path.join(tmpDir, 'gui-helper.cs');
+  const dllPath = path.join(tmpDir, 'gui-helper.dll');
+  try {
+    const dump = spawnSync(PWSH, ['-NoProfile', '-NonInteractive', '-File', GUI_PS, '--dump-csharp', csPath], {
+      encoding: 'utf8',
+      timeout: 120000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (dump.error || dump.status !== 0 || !fs.existsSync(csPath)) {
+      const detail = `${(dump.stdout || '').trim()} ${(dump.stderr || '').trim()}`.trim();
+      record('FAIL', 'gui.ps1 inline C# compiles', `--dump-csharp failed: ${detail || `exit ${dump.status}`}`);
+      return;
+    }
+    const compile = spawnSync(MCS, ['-target:library', '-out:' + dllPath, csPath], {
+      encoding: 'utf8',
+      timeout: 120000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const detail = `${(compile.stdout || '').trim()} ${(compile.stderr || '').trim()}`.trim();
+    if (compile.error) record('SKIP', 'gui.ps1 inline C# compiles', `mcs failed to run: ${compile.error.message}`);
+    else if (compile.status !== 0) record('FAIL', 'gui.ps1 inline C# compiles', detail || `exit ${compile.status}`);
+    else record('PASS', 'gui.ps1 inline C# compiles (log pump helper)');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 /** Windows GUI scripts + launchers (win32-helper artifacts). Missing files SKIP. */
 function checkWindowsGuiArtifacts() {
   // ---- gui.ps1 ---------------------------------------------------------
@@ -126,6 +177,8 @@ function checkWindowsGuiArtifacts() {
       ['Add-Type -AssemblyName System.Windows.Forms', /Add-Type\s+-AssemblyName\s+System\.Windows\.Forms/],
       ['CreateNoWindow', /CreateNoWindow/],
       ['--relay-code-file', /--relay-code-file/],
+      ['Add-Type -TypeDefinition $csharp (log pump compiled)', /Add-Type\s+-TypeDefinition\s+\$csharp/],
+      ['New-Object DsRemoteGuiLogPump', /New-Object\s+DsRemoteGuiLogPump/],
       ['Start button/label', /\bStart\b/],
       ['Stop button/label', /\bStop\b/],
     ];
@@ -136,6 +189,9 @@ function checkWindowsGuiArtifacts() {
       record('FAIL', 'gui.ps1 contains required markers', `missing: ${missing.join(', ')}`);
     }
   }
+
+  // ---- gui.ps1 inline C# actually compiles and loads --------------------
+  checkGuiCsharpCompiles();
 
   // ---- start-agent-gui.bat --------------------------------------------
   if (!fs.existsSync(GUI_BAT)) {

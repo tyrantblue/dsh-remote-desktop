@@ -138,6 +138,28 @@ try {
     exit 2
 }
 
+# ---- compile the log pump helper defined above ---------------------------
+# The class is only defined as source text until this point; without the
+# compilation step the Start button used to fail with "cannot find type
+# DsRemoteGuiLogPump" (the source was only used by --dump-csharp).
+try {
+    if (-not ('DsRemoteGuiLogPump' -as [type])) {
+        Add-Type -TypeDefinition $csharp -Language CSharp -ReferencedAssemblies 'System.dll' -ErrorAction Stop
+    }
+} catch {
+    $script:InitMessage = 'gui_init_failed: cannot compile the log pump helper: ' + $_.Exception.Message
+    [Console]::Error.WriteLine($script:InitMessage)
+    try {
+        [void][System.Windows.Forms.MessageBox]::Show(
+            $script:InitMessage,
+            'DSH Remote Desktop Agent',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+    } catch { }
+    exit 3
+}
+
 # ---- paths and script state ----------------------------------------------
 $script:WindowsDir = $PSScriptRoot
 if (-not $script:WindowsDir) {
@@ -621,6 +643,11 @@ function Start-Agent {
         return
     }
 
+    if (-not ('DsRemoteGuiLogPump' -as [type])) {
+        Show-Message 'The log helper failed to load. Restart this window; if it keeps failing, run start-agent.bat (console mode) instead.' 'DSH Remote Desktop Agent' 'Error'
+        try { $process.Kill() } catch { }
+        return
+    }
     $script:LogPump = New-Object DsRemoteGuiLogPump
     $script:LogPump.Pump($process.StandardOutput)
     $script:LogPump.Pump($process.StandardError)
