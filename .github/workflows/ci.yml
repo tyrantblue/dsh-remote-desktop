@@ -24,7 +24,17 @@ jobs:
           sudo apt-get install -y -qq xvfb x11-apps x11-utils xterm x11-xserver-utils xdotool
 
       - name: End-to-end suite (27 cases)
+        env:
+          KEEP_ARTIFACTS: 1
         run: bash test/run.sh
+
+      - name: Upload E2E artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: /tmp/rdtest-e2e-*
+          if-no-files-found: ignore
 
       - name: Windows static checks (PowerShell parse + inline C# compile when tools exist)
         run: node test/static-checks.mjs

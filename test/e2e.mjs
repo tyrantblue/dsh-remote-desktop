@@ -1439,9 +1439,34 @@ async function stopWin32Agent(instance, { timeoutMs = 10000 } = {}) {
         mark: markB,
       });
       assertEqual(startedB.width, SCREEN_WIDTH, 'B screen.started width');
-      const keyframeB = await clientB.waitForNewFrame((frame) => frame.keyframe && frame.tiles.length > 0, {
-        label: 'keyframe on B',
-      });
+      let keyframeB;
+      try {
+        keyframeB = await clientB.waitForNewFrame((frame) => frame.keyframe && frame.tiles.length > 0, {
+          label: 'keyframe on B',
+        });
+      } catch (error) {
+        // Environment-specific diagnostics (CI runners have failed here): show what
+        // the second client actually received and what the agent logged.
+        const after = clientB.messages.slice(markB.messages).map((message) => message.t);
+        console.log(`        DIAG concurrency: B messages after mark = ${JSON.stringify(after)}`);
+        console.log(
+          `        DIAG concurrency: B frames after mark = ${JSON.stringify(
+            clientB.frames.slice(markB.frames).map((frame) => ({
+              seq: frame.seq,
+              keyframe: frame.keyframe,
+              tiles: frame.tiles.length,
+              encoding: frame.encoding,
+            })),
+          )}`,
+        );
+        console.log(
+          `        DIAG concurrency: B decodeErrors = ${
+            clientB.decodeErrors.map((e) => e && e.message).join('; ') || '(none)'
+          }`,
+        );
+        console.log(`        DIAG concurrency: agent log tail =\n${tailFile(ctx.agentLogPath, 4000)}`);
+        throw error;
+      }
       assertFrameTilesGrid(keyframeB, 'client B keyframe');
 
       // A screen change must reach both independent frame streams.
