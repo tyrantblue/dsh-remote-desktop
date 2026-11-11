@@ -44,6 +44,7 @@ const PWSH = process.env.PWSH || '/opt/pwsh/pwsh';
 const MCS = process.env.MCS || 'mcs';
 const GUI_PS = path.join(REPO_DIR, 'agent', 'windows', 'gui.ps1');
 const GUI_BAT = path.join(REPO_DIR, 'agent', 'windows', 'start-agent-gui.bat');
+const START_BAT = path.join(REPO_DIR, 'agent', 'windows', 'start-agent.bat');
 const INSTALL_PS = path.join(REPO_DIR, 'agent', 'windows', 'install.ps1');
 const ROOT_README = path.join(REPO_DIR, 'README.md');
 
@@ -163,6 +164,24 @@ function checkGuiCsharpCompiles() {
   }
 }
 
+/** Both launchers must tell the user when port 38080 is already owned. */
+function checkPortPreflight() {
+  const checks = [
+    [GUI_PS, 'gui.ps1 preflights the agent port', [/TcpClient/, /already in use/i]],
+    [START_BAT, 'start-agent.bat preflights the agent port', [/TcpClient/, /port 38080 is already in use/i]],
+  ];
+  for (const [file, name, patterns] of checks) {
+    if (!fs.existsSync(file)) {
+      record('SKIP', name, `missing ${file}`);
+      continue;
+    }
+    const text = fs.readFileSync(file, 'latin1');
+    const missing = patterns.filter((re) => !re.test(text));
+    if (missing.length === 0) record('PASS', name);
+    else record('FAIL', name, 'missing port-in-use preflight text');
+  }
+}
+
 /** Windows GUI scripts + launchers (win32-helper artifacts). Missing files SKIP. */
 function checkWindowsGuiArtifacts() {
   // ---- gui.ps1 ---------------------------------------------------------
@@ -192,6 +211,9 @@ function checkWindowsGuiArtifacts() {
 
   // ---- gui.ps1 inline C# actually compiles and loads --------------------
   checkGuiCsharpCompiles();
+
+  // ---- port preflight (EADDRINUSE would otherwise show up as a child error)
+  checkPortPreflight();
 
   // ---- start-agent-gui.bat --------------------------------------------
   if (!fs.existsSync(GUI_BAT)) {

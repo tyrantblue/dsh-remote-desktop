@@ -143,6 +143,10 @@ echo.
 echo  Starting the agent on port 38080 ...
 echo.
 
+rem ---- fail fast when another agent (GUI or console) already owns the port ----
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', 38080); $c.Close(); exit 0 } catch { exit 1 }"
+if not errorlevel 1 goto :port_in_use
+
 if defined RELAY_URL goto :run_with_relay
 "%NODE_CMD%" "%~dp0..\remote-agent.mjs" --port 38080 --bind 0.0.0.0 --fs-root "%USERPROFILE%" --password-file "%~dp0agent-password.txt"
 set "AGENT_EXIT=%ERRORLEVEL%"
@@ -160,6 +164,20 @@ if defined RELAY_URL echo If the relay failed, look for "[relay] connect failed"
 echo.
 pause
 exit /b %AGENT_EXIT%
+
+:port_in_use
+echo.
+echo ERROR: port 38080 is already in use - another agent is already running.
+echo   - If the GUI window is open, click "Stop agent" there (or close the window).
+echo   - Otherwise double-click stop-agent.bat, or find and stop the process:
+echo       netstat -ano ^| findstr ":38080"
+echo       taskkill /PID ^<pid^> /T /F
+echo   Then start only ONE agent: the GUI (start-agent-gui.bat) OR this bat.
+echo.
+netstat -ano | findstr ":38080"
+echo.
+pause
+exit /b 1
 
 :missing_agent
 echo ERROR: "%~dp0..\remote-agent.mjs" was not found.

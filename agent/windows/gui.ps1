@@ -594,6 +594,22 @@ function Start-Agent {
 
     if ((Read-Password).Length -eq 0) { Initialize-Password }
 
+    # A second agent cannot bind the same port; say so instead of letting the
+    # child exit with an EADDRINUSE line the user has to decode.
+    $portBusy = $false
+    try {
+        $probe = New-Object System.Net.Sockets.TcpClient
+        $probe.Connect('127.0.0.1', $port)
+        $probe.Close()
+        $portBusy = $true
+    } catch {
+        $portBusy = $false
+    }
+    if ($portBusy) {
+        Show-Message ('Port ' + $port + ' is already in use: another agent is still running (the GUI Start button or start-agent.bat).' + [Environment]::NewLine + [Environment]::NewLine + 'Click "Stop agent" here, or run stop-agent.bat, then start only one agent.') 'DSH Remote Desktop Agent' 'Warning'
+        return
+    }
+
     $profileDir = $env:USERPROFILE
     if ($null -eq $profileDir -or $profileDir.Length -eq 0) {
         $profileDir = [Environment]::GetFolderPath('UserProfile')
