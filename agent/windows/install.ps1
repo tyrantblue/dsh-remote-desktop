@@ -85,6 +85,13 @@ try {
         $keepNode = Join-Path $tempRoot 'node-backup'
         Copy-Item -LiteralPath $oldNode -Destination $keepNode -Recurse -Force
     }
+    # relay.txt holds the Harness address used for cross-NAT relay connections;
+    # an upgrade must not force the user to look it up again.
+    $relayFile = Join-Path $targetWindows 'relay.txt'
+    $keepRelay = $null
+    if (Test-Path -LiteralPath $relayFile) {
+        $keepRelay = Get-Content -LiteralPath $relayFile -Raw
+    }
 
     if (Test-Path -LiteralPath $targetAgent) {
         Remove-Item -LiteralPath $targetAgent -Recurse -Force
@@ -101,6 +108,10 @@ try {
         Copy-Item -LiteralPath $keepNode -Destination $oldNode -Recurse -Force
         Write-Step 'Kept the existing portable Node.js runtime.'
     }
+    if ($null -ne $keepRelay) {
+        [System.IO.File]::WriteAllText($relayFile, $keepRelay, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+        Write-Step 'Kept the existing relay.txt.'
+    }
 
     $startBat = Join-Path $targetWindows 'start-agent.bat'
     Write-Host ''
@@ -108,6 +119,13 @@ try {
     Write-Host ('  agent:    ' + $targetAgent)
     Write-Host ('  launcher: ' + $startBat)
     Write-Host ('  password: ' + (Join-Path $targetWindows 'agent-password.txt') + ' (created on first start)')
+    Write-Host ''
+    Write-Host 'Cross-NAT / relay (no public IP or router port forwarding needed):'
+    Write-Host ('  If the Harness is NOT on this LAN, create: ' + (Join-Path $targetWindows 'relay.txt'))
+    Write-Host '  and put the Harness address on its first line, for example:'
+    Write-Host '    https://your-harness.example.com'
+    Write-Host '  Then start the agent and add this host in the panel with "Relay" mode'
+    Write-Host '  (the agent prints the access code). LAN direct mode keeps working.'
     Write-Host ''
     if ($NoStart) {
         Write-Host 'Start it with:'

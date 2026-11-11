@@ -19,6 +19,10 @@
 │  └─ 命令终端抽屉              │         │   ├─ 文件 API（fs-root 沙箱）             │
 └──────────────────────────────┘         │   └─ 远程 shell（Windows: cmd / Linux: PTY）│
                                          └──────────────────────────────────────────┘
+
+被控机在 NAT 后（家用宽带/公司网没有公网 IPv4）时，走 Harness 上的反向中继：
+Windows Agent 主动出站 wss → Harness `/api/auth/remote-desktop/relay/agent`，
+浏览器面板经同一 origin 的 `/api/auth/remote-desktop/relay/...` 访问，无需公网端口。
 ```
 
 ## 功能
@@ -54,7 +58,7 @@
 ├── test/                  Xvfb 真实端到端测试 + Windows fake-helper 协议测试
 ├── demo/                  真实远程画面演示（截图）与本地演示被控端沙箱
 ├── scripts/               本机 demo 被控端启动/停止脚本
-└── docs/                  协议契约 / Windows 契约 / X11 实现笔记 / 插件实现规范
+└── docs/                  协议契约 / 中继契约 / Windows 契约 / X11 实现笔记 / 插件实现规范
 ```
 
 ## 快速开始
@@ -83,6 +87,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 
 > 该窗口保持打开即被控中；`Ctrl+C` 停止（也可运行 `stop-agent.bat` 兜底）。
 > 必须在**已登录且未锁屏**的交互式桌面里运行：Windows 的锁屏/UAC 安全桌面无法被控制（系统安全边界，VNC/向日葵同样如此）。
+
+**不在同一局域网（跨 NAT / 公网）时用中继**（推荐，家用宽带/公司网都可用，不需要公网 IP）：
+
+1. 在 `agent\windows\` 下新建 `relay.txt`，内容一行：`https://dsh.tyrantblue.xyz`（面板「添加主机 → 中继」里有「复制 relay.txt」按钮，复制出来的就是这个地址）；
+2. 重新启动 `start-agent.bat`，控制台会出现 `[relay] connected ... 接入码: XXXXXXXXXX`（接入码每次启动随机；可用 `--relay-code` 固定）；
+3. 面板刷新页面 →「添加主机」→ 连接方式选「中继（跨 NAT）」→ 填接入码 + 密码 → 连接。
 
 ### 2. Linux/X11 被控机（保留路径，也是 E2E 环境）
 
@@ -118,7 +128,7 @@ node agent/remote-agent.mjs \
 ### 4. 连接
 
 1. 点击侧边栏「远程桌面」；
-2. 「＋ 添加主机」→ 名称随便填，地址填 `被控机IP`（默认端口 38080）或 `被控机IP:端口`，密码填 Agent 的密码；
+2. 「＋ 添加主机」→ 连接方式选「直连（局域网）」填 `被控机IP`（默认端口 38080）或 `被控机IP:端口` + 密码；跨 NAT 时选「中继（跨 NAT）」填接入码 + 密码（见下方中继一节）；
 3. 点击主机 → 连接 → 画面出现后点击画面即可捕获键盘，鼠标/滚轮直接操作远端；
 4. 工具栏「文件」打开文件抽屉，「终端」打开命令行抽屉；Windows 被控端可用「画质」下拉调节 JPEG 质量。
 
@@ -142,11 +152,28 @@ bash scripts/demo-stop.sh      # 停止
 - **E2E：27/27 通过**（`bash test/run.sh`，约 17 秒，退出码 0）：
   - 01–22 Linux/X11：HTTP 鉴权/限流/CORS/文件越界、WS 握手与 hello 顺序、屏幕 keyframe 与独立 `xwd` 逐像素比对、增量瓦片、`screen.refresh`、鼠标（xev MotionNotify/Button）、键盘（keycode 38 / Shift state 0x1 / releaseAll 防卡键）、真实字符输入到 xterm、文本注入、shell、双客户端并发、SIGINT/端口/子进程/Xvfb 清理；
   - 23–27 **Windows 后端（fake helper）**：`platform=win32` 与 `screen=800x600`（来自 helper hello）、`encoding:"jpeg"` 全帧（header 字段、无 tiles、payloadLen、FFD8…FFD9、与 fixture 字节相等、seq 递增）、mouse/wheel/key+mods/Unicode text/releaseAll **逐字段转发到 helper 日志**、helper 崩溃/坏 JSON/抓帧超时后 Agent 存活并以 `error no_screen` 上报、SIGINT 后 Agent 与 helper 零残留。
+- **中继 E2E：13/13 通过**（`node test/relay.mjs`，约 4 秒）：`/info` 契约、真实 Agent 出站注册、经中继 auth/info、文件 upload/list/download 字节一致、WS hello/welcome + tiles keyframe（解码并与 `xwd` 参考比对）、输入、shell、未知 code（404 `relay_unknown_code`）、离线（503 `relay_offline`）、错误 token（1011）、心跳 ping→pong、崩溃/重连、win32 fake-helper JPEG、清理归零。
+- **公网中继实测**（本机 Linux Agent → `wss://dsh.tyrantblue.xyz`，浏览器走公网 HTTPS/WSS）：10/10 通过——wss 握手/注册、`/info`、auth、`/api/info`、文件上传下载、WS welcome、tiles 帧、shell；另有 stub 的文本/二进制双向帧、Cloudflare 下 6/6 通过。
 - **Windows 静态校验**（`node test/static-checks.mjs`，4 PASS / 0 FAIL / 0 SKIP）：JPEG fixture 可解码；`agent/windows/capture-input.ps1` 经 PowerShell 7.4.6 Parser 语法校验；内联 C# 经 `--dump-csharp` 导出后用 Mono `mcs` 编译通过；PS 纯 ASCII。另有 helper 自身的 JSON Lines 协议测试（mock C#）25/25，键位扫描码表覆盖 102 个必需 code 全命中。
 - **真实画面演示（`bash demo/run.sh`）**：Xvfb + 真 xterm + bash + Agent，客户端经 Agent 键盘注入逐字键入命令，取 `screen.refresh` 的全量帧解码为 RGBA 后写 PNG：`demo/screenshot.png`。
 - **Harness 侧**：bundle 安装 `application: applied`；客户端模块 `/plugins/??@local/remote-desktop/client.js&rev=…` 返回 200；live Client 注册表里 `sidebar.panellist` 有 `remote-desktop`（order 5），`main` 有 key `remote-desktop`（active），页面无刷新即已热加载。
 - **X11 层**：`getImage` 像素与 `xwd` 一致；XTEST 注入经 `xev` 验证（按键 keycode、Shift 状态、鼠标按键）；Xauthority 的 6 种场景（正确/缺失/错误 cookie、wildcard、`~/.Xauthority`、TCP+auth）实测符合预期。
 - **插件 UI**：`node --check` 通过；mock 加载器 + 假 ctx 执行 `apply` 验证注册；组件浅渲染/JPEG 解码分支/画质与重连逻辑共 54 项冒烟通过；live Client 注册表在页面热加载后含 `remote-desktop` 入口与主面板。**浏览器内真实视觉/交互、以及 Windows 真实运行（双击启动/GDI 截屏/SendInput/防火墙）无法在本环境自动验证**（见下方限制）。
+
+## 跨 NAT 中继（公网连接）
+
+普通宽带没有公网 IPv4，浏览器不能直连被控机的 `10.x/192.168.x`，直连模式只适合同一局域网。
+中继模式让**被控端主动出站**连到 Harness，浏览器再经同一个 Harness 域访问（与向日葵/UU 的汇聚服务器思路一致，但不经过第三方）：
+
+```
+Windows Agent ──出站 wss──▶ Harness /api/auth/remote-desktop/relay/agent?code=接入码
+浏览器面板 ──同 origin──▶ Harness /api/auth/remote-desktop/relay/client/<code>/...
+```
+
+- 不需要公网 IP、路由器端口映射、内网穿透工具；Windows 只要能访问 `https://<你的 Harness>` 即可。
+- 中继跑在 Harness 进程内存里（`plugin/relay-host.mjs`），不落盘、不记录 payload；仍由 Agent 校验密码和 WS token。
+- 路径位于 Harness 登录墙唯一放行的 `/api/auth/` 前缀下（被控端没有 Harness 登录态）；接入码是随机 10 位 `[A-Z0-9]`，只发给要控制的人。Harness 管理员可设 `DSH_REMOTE_RELAY_TOKEN` 进一步限制 Agent 注册。
+- 契约与实现细节见 [docs/RELAY.md](docs/RELAY.md)；Windows 侧配置/排障见 [agent/windows/README.zh.md](agent/windows/README.zh.md) §8。
 
 ## 安全建议
 

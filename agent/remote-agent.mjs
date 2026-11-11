@@ -22,6 +22,7 @@ import { AuthService, HttpApi } from './lib/http.mjs';
 import { FileService } from './lib/files.mjs';
 import { ShellSession } from './lib/shell.mjs';
 import { createBackend } from './lib/backend.mjs';
+import { RelayClient, generateRelayCode } from './lib/relay-client.mjs';
 
 const PROTOCOL_VERSION = 1;
 const AGENT_VERSION = '1.0.0';
@@ -67,8 +68,15 @@ Options:
   --read-only-fs         make the file API read-only
   --token-ttl-hours <n>  auth token lifetime in hours (default ${DEFAULT_TOKEN_TTL_HOURS})
   --insecure             no-password mode (testing only; binds 127.0.0.1 unless --bind given)
+  --relay <base-url>     connect out to a Harness relay (https://host[/path] or wss://host)
+  --relay-code <CODE>    relay access code, 6-32 chars [A-Za-z0-9_-] (default: generated)
   --quiet                suppress informational output
   -h, --help             show this help
+
+Environment:
+  REMOTE_AGENT_PASSWORD     access password when --password/--password-file are absent
+  REMOTE_AGENT_RELAY_TOKEN  optional relay token (Host DSH_REMOTE_RELAY_TOKEN)
+  RDA_HELPER_CMD            Windows helper command override (testing)
 `;
 }
 
@@ -88,6 +96,8 @@ function parseArgs(argv) {
     tokenTtlHours: DEFAULT_TOKEN_TTL_HOURS,
     insecure: false,
     quiet: false,
+    relay: null,
+    relayCode: null,
     help: false,
   };
 
@@ -99,6 +109,8 @@ function parseArgs(argv) {
     '--display',
     '--fs-root',
     '--token-ttl-hours',
+    '--relay',
+    '--relay-code',
   ]);
   const booleanFlags = new Set([
     '--no-screen',
@@ -195,6 +207,15 @@ function parseArgs(argv) {
         opts.tokenTtlHours = hours;
         break;
       }
+      case '--relay':
+        opts.relay = value;
+        break;
+      case '--relay-code':
+        if (!/^[A-Za-z0-9_-]{6,32}$/.test(value)) {
+          throw new Error(`invalid --relay-code value: ${value} (6-32 characters of A-Z a-z 0-9 _ -)`);
+        }
+        opts.relayCode = value;
+        break;
       default:
         break;
     }
@@ -1041,10 +1062,20 @@ async function main() {
   });
 
   let shuttingDown = false;
+  let relayClient = null;
   const shutdown = async (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
     log(`received ${signal}, shutting down`);
+    // Stop the outbound relay tunnel first (RELAY.md §3 / task-10).
+    if (relayClient) {
+      try {
+        await relayClient.stop();
+      } catch {
+        /* ignore */
+      }
+      relayClient = null;
+    }
     try {
       wsServer.close();
     } catch {
@@ -1102,6 +1133,39 @@ async function main() {
   log(
     `capabilities: screen=${capabilities.screen} input=${capabilities.input} shell=${capabilities.shell} files=${capabilities.files} text=${capabilities.text}`,
   );
+
+  // ---- reverse relay (optional) ------------------------------------------
+  if (opts.relay) {
+    const code = opts.relayCode || generateRelayCode();
+    if (typeof WebSocket !== 'function') {
+      logWarn('relay mode requires Node.js >= 22 (global WebSocket is not available); running local mode only');
+    } else {
+      try {
+        relayClient = new RelayClient({
+          relayUrl: opts.relay,
+          code,
+          port: actualPort,
+          host: '127.0.0.1',
+          relayToken: process.env.REMOTE_AGENT_RELAY_TOKEN || null,
+          platform,
+          log: quiet ? () => {} : (...args) => console.log(...args),
+          warn: quiet ? () => {} : (...args) => console.warn(...args),
+        });
+        if (!quiet) {
+          console.log(`[relay] code: ${relayClient.code} (在远程桌面面板选择“中继”，填入接入码+密码)`);
+          console.log(`[relay] server: ${opts.relay}`);
+        }
+        relayClient.start().catch((err) => {
+          logWarn(`[relay] disabled: ${err && err.message ? err.message : err}`);
+        });
+      } catch (err) {
+        relayClient = null;
+        logWarn(`[relay] disabled: ${err && err.message ? err.message : err}`);
+      }
+    }
+  } else if (opts.relayCode) {
+    logWarn('--relay-code ignored because --relay was not given');
+  }
 }
 
 main().catch((err) => {

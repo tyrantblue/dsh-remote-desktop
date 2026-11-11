@@ -10,6 +10,7 @@
 |---|---|
 | `capture-input.ps1` | 采集与注入 helper：GDI 截屏（JPEG）+ SendInput 注入，JSON Lines over stdio |
 | `start-agent.bat` | 一键启动器：找/下载 Node → 生成密码 → 打印 IP → 启动 Node Agent |
+| `relay.txt` | 可选（用户创建）：跨 NAT 中继的 Harness 地址，见 §8 |
 | `stop-agent.bat` | 兜底停止（正常方式是 Ctrl+C） |
 | `README.zh.md` | 本文档 |
 | `agent-password.txt` | 首次启动自动生成的访问密码（明文，运行时生成） |
@@ -19,6 +20,10 @@
 HTTP / 文件 / 命令），Node 再按需拉起 `capture-input.ps1`（提供截图与键鼠注入）。
 helper 通过 stdin/stdout 的 JSON Lines 与 Node 对话，契约见 `docs/WINDOWS.md` §2。
 
+如果被控机和 Harness **不在同一局域网**（家用宽带没有公网 IP），不需要端口映射：
+把 Harness 地址写进 `agent\windows\relay.txt`，Agent 会主动出站连接 Harness 的中继，
+面板用「中继 + 接入码」连接，详见 §8。
+
 ---
 
 ## 1. 系统要求
@@ -26,7 +31,7 @@ helper 通过 stdin/stdout 的 JSON Lines 与 Node 对话，契约见 `docs/WIND
 - Windows 10 / Windows 11（x64 已按目标设计；32 位未验证）。
 - **必须已登录的交互式桌面会话**（见 §4.1，这是最重要的限制）。
 - 不需要管理员权限；建议用普通用户账户运行（helper 以当前用户权限运行）。
-- 端口 `38080`（TCP，局域网可达）。
+- 端口 `38080`（TCP，局域网可达；跨 NAT 时无需开放任何端口，走中继，见 §8）。
 - 首次运行需要联网下载便携版 Node.js（约 30 MB）；之后可离线使用（见 §7.1）。
 
 ## 2. 快速开始（3 步）
@@ -44,10 +49,16 @@ helper 通过 stdin/stdout 的 JSON Lines 与 Node 对话，契约见 `docs/WIND
 首次启动时 Windows 防火墙可能弹窗，**勾选「专用网络」并点「允许访问」**。
 控制台窗口需要保持打开；关闭窗口或按 `Ctrl+C` 即停止被控端。
 
+如果被控机和 Harness 不在同一局域网：在 `agent\windows\relay.txt` 第一行写入 Harness
+地址（如 `https://dsh.example.com`）后重新双击启动器，面板主机模式选「中继」并填控制台
+打印的接入码，完整步骤见 §8。
+
 ## 3. 面板连接说明
 
 - 面板左侧「主机」列表里新增一条：地址填 `192.168.x.x:38080`（不要带 `http://`）。
 - 密码就是 `agent-password.txt` 的 16 位内容（文件里只有密码本身，无换行也可）。
+- 跨 NAT（公网/不同网络）：主机模式选「中继」，填控制台打印的**接入码** + 密码，
+  不填地址（中继地址自动取当前 Harness 页面 origin），见 §8。
 - 连接后：
   - 画面：Windows 端是 **JPEG 整帧**编码（面板工具栏可选画质 低/中/高/极高，
     默认「高 65」）。1080p、质量 65 时单帧约 200–400 KB，建议局域网使用。
@@ -114,13 +125,16 @@ helper 以启动它的用户权限运行，**不请求也不应该请求 UAC 提
    能访问的目录。
 5. 建议用**普通用户**运行，可减少被控制后能触及的范围（但也就无法操作系统级设置）。
 6. 首次运行时 Windows 防火墙弹窗请只勾选「专用网络」。
+7. 使用中继时，**接入码等同于额外凭据**，只发给要控制的人；重启 Agent 会重新生成
+   接入码（需要固定时用 `--relay-code`，见 §8.2）。
 
 ## 6. 停止与卸载
 
 - 正常停止：在被控端控制台窗口按 `Ctrl+C`（Agent 会关闭连接、结束 helper）。
 - 窗口丢了或 Ctrl+C 无效：双击 `stop-agent.bat`（按命令行匹配 `remote-agent.mjs`
   结束 node 进程；子 helper 会在 stdin EOF 后自行退出）。
-- 卸载：**直接删除整个目录**即可。本工具不写注册表、不装服务、不加自启动项。
+- 卸载：**直接删除整个目录**即可（`agent-password.txt`、`relay.txt`、`node\` 都在目录
+  内，一并删除）。本工具不写注册表、不装服务、不加自启动项。
   如加过防火墙规则，用 §5 的 `netsh ... delete rule` 删除。
 
 ## 7. 排障
@@ -229,7 +243,88 @@ powershell -NoProfile -Command "$PSVersionTable.PSVersion"
 - 启动后第一帧之前有约 1–3 秒的内联 C# 编译时间（`Add-Type`），面板上表现为
   "连接中"稍久，属正常。
 
-## 8. 已验证 / 待人工验证
+### 7.9 跨 NAT / 中继
+
+- 控制台**完全没有** `[relay]` 行：`relay.txt` 没被读到（文件名/位置/第一行是空行或
+  `#` 注释）；启动器 `[3/4]` 那行应显示 `Relay server: ...` 才说明读到了配置。
+- 看到 `[remote-agent] relay mode requires Node.js >= 22`：Node 版本过低（便携版 v22 满足）。
+- 有 `[relay] connect failed`：检查 Harness 地址、公司网络/代理拦截出站 WSS、
+  Cloudflare 是否开启 WebSocket。
+- 完整配置步骤与排障见 §8（跨 NAT / 公网中继）。
+
+## 8. 跨 NAT / 公网中继
+
+**原理一句话**：被控端（Windows Agent）**主动出站**连接你正在使用的这个 Harness 的中继
+接口（`<Harness 地址>/api/auth/remote-desktop/relay/agent`），浏览器面板也连同一个 Harness，由
+Harness 在内存里做字节转发。所以**不需要公网 IP、不需要路由器端口映射**，也不需要
+向日葵/UU 之类的第三方软件。中继只转发字节、不落盘、不记录画面；密码仍然只由本机
+Agent 校验。协议细节见 `docs/RELAY.md`。
+
+### 8.1 配置（3 步）
+
+1. 在 `agent\windows\` 下新建文本文件 `relay.txt`，**第一行**写 Harness 地址
+   （`http://` 或 `https://`，不要带路径和结尾斜杠），例如：
+   ```
+   https://dsh.example.com
+   ```
+   - 面板「添加主机」对话框在「中继」模式下提供一键复制，内容就是这个 origin；
+   - 空行和以 `#` 开头的行会被忽略，取第一行有效内容；
+   - 建议用记事本保存为 ANSI 或 UTF-8（无 BOM），内容只放一行 ASCII 地址最稳妥。
+2. 双击 `start-agent.bat`：
+   - 控制台 `[3/4]` 显示 `Relay server: ...` 表示已读到配置；
+   - Agent 启动后先打印 `[relay] code: ABC123DEF4` 与 `[relay] server: ...`，连上后是
+     `[relay] connected ... 接入码: ABC123DEF4`；
+   - 密码仍是 `agent-password.txt` 里的 16 位内容。
+   - 提示：cmd 控制台编码是本地代码页，Agent 日志里的中文可能显示成乱码，**不影响**
+     ASCII 的接入码与 `[relay]` 关键字。
+3. 面板「添加主机」→ 模式选「中继」→ 填**接入码** + **密码** → 连接。
+   中继地址自动取当前 Harness 页面的 origin，不用手填。
+
+局域网直连（`IP:38080`）和公网中继可以**同时使用**：Agent 仍然监听 `0.0.0.0:38080`，
+`relay.txt` 只是额外开一条出站隧道；不需要改任何既有配置。
+
+### 8.2 接入码
+
+- 默认**每次启动**随机生成 10 位 `[A-Z0-9]`，所以重启 Agent 后面板里要更新接入码。
+- 需要固定接入码时，可以在本机命令行启动 Agent（先在 bat 窗口按 `Ctrl+C` 停掉）：
+  ```
+  cd /d <安装目录>\agent
+  node remote-agent.mjs --port 38080 --bind 0.0.0.0 --fs-root "%USERPROFILE%" --password-file windows\agent-password.txt --relay https://dsh.example.com --relay-code YOURCODE
+  ```
+  `YOURCODE` 用 6–32 位 `[A-Za-z0-9_-]`；同一个接入码同时只保留最新一条 Agent 连接
+  （重连会顶掉旧的）。
+- 接入码只发给要控制这台机器的人；泄露后重启 Agent 换新码。
+
+### 8.3 安全
+
+- 中继不改变鉴权：面板登录仍要 Agent 密码，密码只在本机校验；中继按字节转发、不落盘。
+- 中继入口不要求 Harness 登录，安全边界 = **接入码随机性 + Agent 密码**。
+- Harness 管理员若设置了 `DSH_REMOTE_RELAY_TOKEN`，Agent 必须额外带 token 才能连中继；
+  **Windows 侧不需要任何配置**，若 Harness 开了它而你的 Agent 连不上，请联系 Harness
+  管理员确认 token 是否随 Agent 一起分发。
+- 只在你信任的 Harness 上使用中继；接入码不要发到公开群或截图里。
+
+### 8.4 排障
+
+- 控制台**完全没有** `[relay]` 行：`relay.txt` 没读到（文件名/位置不对、第一行是空行
+  或 `#` 注释）。`[3/4]` 那行应显示 `Relay server: ...`，否则回看启动器的 `[3/4]` 段落。
+- 看到 `[remote-agent] relay mode requires Node.js >= 22`：Node 版本过低。便携版
+  v22.14.0 满足；若 PATH 里有更旧的 `node`，升级它或临时改名让启动器改用 `node\`。
+- `[relay] disabled: invalid relay URL: ...`：`relay.txt` 第一行少了 `http://` 或
+  `https://` 前缀，Agent 会退回仅局域网模式，改成完整地址即可。
+- `[relay] disabled: ...` / `[relay] connect failed: ... (retry in Ns)`：先检查地址是否
+  可访问 —— 浏览器打开 `https://<地址>/api/auth/remote-desktop/relay/info` 应返回
+  `{"enabled":true,...}`；再检查公司网络/代理是否拦截出站 WSS；用 Cloudflare 时确认
+  已开启 WebSocket。
+- 面板选「中继」提示接入码无效：接入码是否随 Agent 重启变了；Agent 是否在线
+  （看控制台是否有 `[relay] connected`）。
+- 中继能连但画面卡：中继走公网带宽，把面板画质调到「低/中」；直连正常而中继慢通常
+  是上行带宽或跨运营商问题。
+- 升级/重装（`install.ps1`）会重新解压 `agent\` 目录，但会**保留** `agent-password.txt`、
+  `relay.txt` 与便携 `node\`；如果手动覆盖安装，升级前先备份 `relay.txt`
+  （内容与面板里复制的 origin 一致）。
+
+## 9. 已验证 / 待人工验证
 
 Linux 开发环境已完成（静态 + 协议级模拟）：
 
@@ -239,6 +334,9 @@ Linux 开发环境已完成（静态 + 协议级模拟）：
   `DS_REMOTE_DUMP_CSHARP=<path>` 导出内联 C# 供编译校验）。
 - 用 mock native 层在 Linux 上跑通 helper 的**真实 JSON Lines 主循环**（hello/info/
   capture/输入命令/releaseAll/selftest/坏 JSON/shutdown/EOF）：23/23 通过。
+- Windows 启动器/文档的中继支持：`start-agent.bat` 的 `relay.txt` 解析与 `--relay`
+  参数拼装、`install.ps1` 中继提示、README 本节的静态检查（ASCII/CRLF、goto 标签、
+  bat 内嵌 PowerShell 语法解析）；未在 Windows 上实际运行。
 
 **必须在 Windows 实机上人工验证**（无法在 Linux 验证运行时行为）：
 
@@ -246,5 +344,8 @@ Linux 开发环境已完成（静态 + 协议级模拟）：
 - 真实截屏画面、鼠标键盘注入、文本注入、文件上传下载、命令输出；
 - 锁屏 / UAC / 登录界面 / 管理员窗口的实际表现（预期受限，见 §4）；
 - 1080p 单帧耗时与体积是否符合预期（目标 p50 ≤ 60 ms、质量 65 ≤ 400 KB）。
+- 中继：创建 `relay.txt` → 双击启动看到 `[3/4] Relay server: ...` 与
+  `[relay] connected ... 接入码` → 面板「中继」模式用接入码 + 密码连接成功；以及
+  重启后接入码变化、可选 `--relay-code` 固定接入码。
 
 契约权威文档：`docs/WINDOWS.md`（§2 helper JSON Lines 契约、§4 启动器要求）。

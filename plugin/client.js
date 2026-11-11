@@ -47,6 +47,22 @@ window.__ModuleLoader__.load({
 			'host.name': 'Name',
 			'host.address': 'Address',
 			'host.addressHint': 'host, host:port, ws://host:port or http://host:port. The default port is 38080.',
+			'host.mode': 'Connection',
+			'host.modeDirect': 'Direct (LAN)',
+			'host.modeRelay': 'Relay (cross-NAT, recommended)',
+			'host.modeDirectHint': 'The panel connects straight to the agent address. Use it on the same network.',
+			'host.code': 'Access code',
+			'host.codePlaceholder': 'e.g. ABC123DEF4',
+			'host.codeHint': '6–32 characters: A–Z a–z 0–9 _ -. The Windows console prints it when relay mode starts.',
+			'host.codeRequired': 'Enter the relay access code.',
+			'host.codeInvalid': 'The access code must be 6–32 characters (A–Z, a–z, 0–9, _ or -).',
+			'host.relayBadge': 'Relay',
+			'host.relayHint': 'The Windows console prints the access code. The relay is provided by this Harness, so no public port or port forwarding is needed: both the controlled PC and this browser only reach the Harness origin.',
+			'host.relayVia': 'via {origin}',
+			'host.relayDefaultName': 'Relay {code}',
+			'host.connection': 'Connection',
+			'host.copyRelayFile': 'Copy relay.txt',
+			'host.copyCredentials': 'Copy code + password',
 			'host.password': 'Password',
 			'host.passwordHint': 'Stored only in this browser (localStorage) and sent to the agent for authentication.',
 			'host.namePlaceholder': 'e.g. Office PC',
@@ -124,6 +140,7 @@ window.__ModuleLoader__.load({
 			'error.noToken': 'No session token. Connect to the host first.',
 			'error.closed': 'The connection is closed.',
 			'error.unknown': 'Unknown error.',
+			'error.relayOrigin': 'Relay connections need this panel served over http(s) with a usable origin.',
 
 			'common.cancel': 'Cancel',
 			'common.save': 'Save',
@@ -143,6 +160,9 @@ window.__ModuleLoader__.load({
 			'deploy.note': 'The agent needs Node.js and an X11 desktop session (Xorg or Xvfb). Unless TLS is put in front of it, traffic is plain ws/http.',
 			'deploy.details': 'Deployment command',
 			'deploy.addressHint': 'Browser → agent: ws://{host}/ws and http://{host}/api',
+			'deploy.relayTitle': 'Or use relay mode (cross-NAT)',
+			'deploy.relayStep': 'Start the Windows agent with --relay <relay.txt origin>; it prints an access code. In this panel pick Relay and enter the code + password. The relay is served by this Harness, so no public port or router changes are needed.',
+			'deploy.relayFile': 'relay.txt content',
 
 			'files.title': 'Files',
 			'files.pathPlaceholder': 'Absolute path or ~/…',
@@ -197,6 +217,22 @@ window.__ModuleLoader__.load({
 			'host.name': '名称',
 			'host.address': '地址',
 			'host.addressHint': 'host、host:port、ws://host:port 或 http://host:port，默认端口 38080。',
+			'host.mode': '连接方式',
+			'host.modeDirect': '直连（局域网）',
+			'host.modeRelay': '中继（跨 NAT，推荐）',
+			'host.modeDirectHint': '面板直接连接 Agent 地址，适用于同一局域网。',
+			'host.code': '接入码',
+			'host.codePlaceholder': '例如 ABC123DEF4',
+			'host.codeHint': '6–32 位，仅 A–Z a–z 0–9 _ -；Windows 控制台启动中继模式时会打印。',
+			'host.codeRequired': '请输入中继接入码。',
+			'host.codeInvalid': '接入码必须为 6–32 位（A–Z、a–z、0–9、_ 或 -）。',
+			'host.relayBadge': '中继',
+			'host.relayHint': 'Windows 控制台会打印接入码。中继由当前 Harness 提供，无需公网端口或端口转发：被控端与浏览器都只访问 Harness 的 origin。',
+			'host.relayVia': '经由 {origin}',
+			'host.relayDefaultName': '中继 {code}',
+			'host.connection': '连接方式',
+			'host.copyRelayFile': '复制 relay.txt',
+			'host.copyCredentials': '复制接入码 + 密码',
 			'host.password': '密码',
 			'host.passwordHint': '仅保存在本机浏览器 localStorage 中，并发送给 Agent 用于鉴权。',
 			'host.namePlaceholder': '例如：办公室电脑',
@@ -274,6 +310,7 @@ window.__ModuleLoader__.load({
 			'error.noToken': '没有会话令牌，请先连接主机。',
 			'error.closed': '连接已断开。',
 			'error.unknown': '未知错误。',
+			'error.relayOrigin': '中继连接需要面板通过 http(s) 提供服务，且存在可用的 origin。',
 
 			'common.cancel': '取消',
 			'common.save': '保存',
@@ -293,6 +330,9 @@ window.__ModuleLoader__.load({
 			'deploy.note': 'Agent 需要 Node.js 和 X11 桌面会话（Xorg 或 Xvfb）。若不做 TLS 反向代理，流量为明文 ws/http。',
 			'deploy.details': '部署命令',
 			'deploy.addressHint': '浏览器 → Agent：ws://{host}/ws 与 http://{host}/api',
+			'deploy.relayTitle': '或使用中继模式（跨 NAT）',
+			'deploy.relayStep': '用 --relay <relay.txt 中的 origin> 启动 Windows Agent，它会打印接入码。在面板中选择「中继」，填入接入码与密码即可；中继由当前 Harness 提供，无需公网端口或修改路由器。',
+			'deploy.relayFile': 'relay.txt 内容',
 
 			'files.title': '文件',
 			'files.pathPlaceholder': '绝对路径或 ~/…',
@@ -341,6 +381,11 @@ window.__ModuleLoader__.load({
 		const ACTIVE_KEY = 'dsh.remoteDesktop.activeHost.v1';
 		const PROTOCOL_VERSION = 1;
 		const FPS_OPTIONS = [5, 10, 15, 24];
+		// Relay routes live under the Harness login wall's single public prefix
+		// (/api/auth/), so agents and the panel can reach them without a session.
+		const RELAY_HTTP_PATH = '/api/auth/remote-desktop/relay/client/';
+		const RELAY_WS_PATH = '/api/auth/remote-desktop/relay/ws';
+		const RELAY_CODE_PATTERN = /^[A-Za-z0-9_-]{6,32}$/;
 		const DEFAULT_QUALITY = 65;
 		const QUALITY_OPTIONS = [30, 50, 65, 80];
 		const QUALITY_LABEL_KEYS = {
@@ -415,6 +460,9 @@ window.__ModuleLoader__.load({
 			if (code === 'protocol_unsupported') return t('error.protocol', { version: error.protocol || '?' });
 			if (code === 'address_required') return t('host.addressRequired');
 			if (code === 'address_invalid') return t('host.addressInvalid');
+			if (code === 'relay_code_required') return t('host.codeRequired');
+			if (code === 'relay_code_invalid') return t('host.codeInvalid');
+			if (code === 'relay_unavailable') return t('error.relayOrigin');
 			const parts = [];
 			if (code) parts.push(String(code));
 			if (error.message && error.message !== code) parts.push(String(error.message));
@@ -613,11 +661,82 @@ window.__ModuleLoader__.load({
 			};
 		}
 
+		/** The origin this panel is served from; relay traffic always stays same-origin. */
+		function pageOrigin() {
+			try {
+				const location = typeof window !== 'undefined' ? window.location : null;
+				const origin = location && typeof location.origin === 'string' ? location.origin : '';
+				if (origin && origin !== 'null') return origin.replace(/\/+$/, '');
+			} catch (error) {
+				/* fall through to the coded error */
+			}
+			throw makeError('relay_unavailable');
+		}
+
+		/** Non-throwing page origin for hints; empty when the page has no usable origin. */
+		function safePageOrigin() {
+			try {
+				return pageOrigin();
+			} catch (error) {
+				return '';
+			}
+		}
+
+		function relayWsOrigin(origin) {
+			return String(origin).replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:').replace(/\/+$/, '');
+		}
+
+		function relayHttpBase(origin, code) {
+			return String(origin).replace(/\/+$/, '') + RELAY_HTTP_PATH + encodeURIComponent(code);
+		}
+
+		function isValidRelayCode(value) {
+			return RELAY_CODE_PATTERN.test(String(value === undefined || value === null ? '' : value).trim());
+		}
+
+		/** Validate and trim a relay access code (6–32 chars, A–Z a–z 0–9 _ -). */
+		function normalizeRelayCode(value) {
+			const code = String(value === undefined || value === null ? '' : value).trim();
+			if (!code) throw makeError('relay_code_required');
+			if (!RELAY_CODE_PATTERN.test(code)) throw makeError('relay_code_invalid');
+			return code;
+		}
+
+		/** Clipboard helper shared by the deploy guide and the host dialog. */
+		async function copyClipboardText(text) {
+			if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+				await navigator.clipboard.writeText(String(text));
+				return;
+			}
+			throw makeError('clipboard_unavailable');
+		}
+
+		/**
+		 * Build the runtime host used by RemoteClient. Direct hosts keep the
+		 * normalised address; relay hosts use this page's origin for HTTP and WS,
+		 * so the existing HTTP/WS call sites need no relay-specific paths.
+		 */
 		function runtimeHost(host) {
+			if (host.mode === 'relay') {
+				const code = normalizeRelayCode(host.code);
+				const origin = pageOrigin();
+				return {
+					id: host.id,
+					name: host.name || code,
+					mode: 'relay',
+					code: code,
+					password: host.password || '',
+					createdAt: host.createdAt,
+					httpBase: relayHttpBase(origin, code),
+					wsBase: relayWsOrigin(origin),
+					serverLabel: origin,
+				};
+			}
 			const normalized = normalizeAddress(host.address);
 			return {
 				id: host.id,
 				name: host.name || normalized.host || host.address,
+				mode: 'direct',
 				address: host.address,
 				password: host.password || '',
 				createdAt: host.createdAt,
@@ -640,14 +759,26 @@ window.__ModuleLoader__.load({
 				const hosts = [];
 				for (const item of parsed) {
 					if (!item || typeof item !== 'object') continue;
-					if (typeof item.id !== 'string' || typeof item.address !== 'string') continue;
-					hosts.push({
+					if (typeof item.id !== 'string' || !item.id) continue;
+					// v1 entries had no `mode`; they were all direct connections.
+					const mode = item.mode === 'relay' ? 'relay' : 'direct';
+					const base = {
 						id: item.id,
-						name: typeof item.name === 'string' && item.name ? item.name : item.address,
-						address: item.address,
+						mode: mode,
 						password: typeof item.password === 'string' ? item.password : '',
 						createdAt: typeof item.createdAt === 'number' ? item.createdAt : Date.now(),
-					});
+					};
+					if (mode === 'relay') {
+						const code = typeof item.code === 'string' ? item.code.trim() : '';
+						if (!RELAY_CODE_PATTERN.test(code)) continue;
+						base.code = code;
+						base.name = typeof item.name === 'string' && item.name ? item.name : code;
+					} else {
+						if (typeof item.address !== 'string' || !item.address.trim()) continue;
+						base.address = item.address;
+						base.name = typeof item.name === 'string' && item.name ? item.name : item.address;
+					}
+					hosts.push(base);
 				}
 				return hosts;
 			} catch (error) {
@@ -995,7 +1126,10 @@ window.__ModuleLoader__.load({
 			_openSocket(generation) {
 				const self = this;
 				if (typeof WebSocket !== 'function') return Promise.reject(makeError('no_websocket'));
-				const url = this.wsBase + '/ws?token=' + encodeURIComponent(this.token || '');
+				const token = encodeURIComponent(this.token || '');
+				const url = this.host && this.host.mode === 'relay'
+					? this.wsBase + RELAY_WS_PATH + '?code=' + encodeURIComponent(this.host.code || '') + '&token=' + token
+					: this.wsBase + '/ws?token=' + token;
 				let socket;
 				try {
 					socket = new WebSocket(url);
@@ -1709,7 +1843,13 @@ window.__ModuleLoader__.load({
 						'div',
 						{ className: 'rdx-host-main' },
 						h('div', { className: 'rdx-host-name' }, h(StatusDot, { state: status, title: t('state.' + status) }), h('span', { className: 'rdx-host-label' }, host.name)),
-						h('div', { className: 'rdx-host-addr' }, host.address),
+						h(
+							'div',
+							{ className: 'rdx-host-addr' },
+							host.mode === 'relay'
+								? h('span', { className: 'rdx-host-addr-line' }, h('span', { className: 'rdx-badge' }, t('host.relayBadge')), h('span', { className: 'rdx-host-code' }, host.code))
+								: h('span', { className: 'rdx-host-addr-line' }, host.address),
+						),
 					),
 					h(
 						'div',
@@ -1768,16 +1908,64 @@ window.__ModuleLoader__.load({
 		function HostFormModal(props) {
 			const t = props.t;
 			const editing = props.mode === 'edit';
-			const [name, setName] = useState(props.host ? props.host.name : '');
-			const [address, setAddress] = useState(props.host ? props.host.address : '');
-			const [password, setPassword] = useState(props.host ? props.host.password : '');
+			const initialHost = props.host || null;
+			const [mode, setMode] = useState(initialHost && initialHost.mode === 'relay' ? 'relay' : 'direct');
+			const [name, setName] = useState(initialHost ? initialHost.name : '');
+			const [address, setAddress] = useState(initialHost && initialHost.address ? initialHost.address : '');
+			const [code, setCode] = useState(initialHost && initialHost.code ? initialHost.code : '');
+			const [password, setPassword] = useState(initialHost ? initialHost.password : '');
 			const [error, setError] = useState(null);
+			const [copiedField, setCopiedField] = useState(null);
+			const [copyFailed, setCopyFailed] = useState(false);
 			const nameRef = useRef(null);
+			const origin = safePageOrigin();
 			useEffect(function focusFirstField() {
 				if (nameRef.current) nameRef.current.focus();
 			}, []);
+			useEffect(function resetCopiedState() {
+				if (!copiedField) return undefined;
+				const timer = setTimeout(function clearCopyLabel() {
+					setCopiedField(null);
+				}, 1600);
+				return function cleanup() {
+					clearTimeout(timer);
+				};
+			}, [copiedField]);
+			const copy = async function copy(field, text) {
+				setCopyFailed(false);
+				try {
+					await copyClipboardText(text);
+					setCopiedField(field);
+				} catch (failure) {
+					setCopyFailed(true);
+				}
+			};
+			const copyRelayFile = function copyRelayFile() {
+				if (!origin) {
+					setCopyFailed(true);
+					return;
+				}
+				copy('relayFile', origin);
+			};
+			const copyCredentials = function copyCredentials() {
+				const trimmedCode = String(code || '').trim();
+				const text = t('host.code') + ': ' + trimmedCode + '\n' + t('host.password') + ': ' + String(password || '');
+				copy('credentials', text);
+			};
 			const submit = function submit(event) {
 				if (event) event.preventDefault();
+				if (mode === 'relay') {
+					let normalizedCode;
+					try {
+						normalizedCode = normalizeRelayCode(code);
+					} catch (failure) {
+						setError(failure.code === 'relay_code_required' ? t('host.codeRequired') : t('host.codeInvalid'));
+						return;
+					}
+					const relayName = String(name || '').trim() || t('host.relayDefaultName', { code: normalizedCode });
+					props.onSave({ name: relayName, mode: 'relay', code: normalizedCode, password: password });
+					return;
+				}
 				let normalized;
 				try {
 					normalized = normalizeAddress(address);
@@ -1786,19 +1974,85 @@ window.__ModuleLoader__.load({
 					return;
 				}
 				const finalName = String(name || '').trim() || normalized.host || normalized.display;
-				props.onSave({
-					name: finalName,
-					address: normalized.display,
-					password: password,
-				});
+				props.onSave({ name: finalName, mode: 'direct', address: normalized.display, password: password });
 			};
+			const modeField = h(
+				'div',
+				{ className: 'rdx-field' },
+				h('span', { className: 'rdx-field-label' }, t('host.mode')),
+				h(
+					'div',
+					{ className: 'rdx-modes' },
+					h(
+						'button',
+						{
+							type: 'button',
+							className: cx('rdx-mode', mode === 'direct' && 'rdx-mode-active'),
+							onClick: function pickDirect() {
+								setMode('direct');
+								setError(null);
+							},
+						},
+						t('host.modeDirect'),
+					),
+					h(
+						'button',
+						{
+							type: 'button',
+							className: cx('rdx-mode', mode === 'relay' && 'rdx-mode-active'),
+							onClick: function pickRelay() {
+								setMode('relay');
+								setError(null);
+							},
+						},
+						t('host.modeRelay'),
+					),
+				),
+			);
+			const relayFields = h(
+				'div',
+				{ className: 'rdx-form' },
+				h(
+					'div',
+					{ className: 'rdx-field' },
+					h('span', { className: 'rdx-field-label' }, t('host.code')),
+					h('input', {
+						className: 'rdx-input',
+						value: code,
+						placeholder: t('host.codePlaceholder'),
+						spellCheck: false,
+						autoComplete: 'off',
+						onChange: function change(event) {
+							setCode(event.target.value);
+						},
+					}),
+					h('span', { className: 'rdx-hint' }, t('host.codeHint')),
+				),
+				h('div', { className: 'rdx-note' }, t('host.relayHint')),
+				origin ? h('div', { className: 'rdx-hint' }, t('host.relayVia', { origin: origin })) : null,
+				h(
+					'div',
+					{ className: 'rdx-row' },
+					h(
+						Btn,
+						{ size: 'sm', icon: 'copy', onClick: copyRelayFile },
+						copiedField === 'relayFile' ? t('common.copied') : t('host.copyRelayFile'),
+					),
+					h(
+						Btn,
+						{ size: 'sm', icon: 'copy', onClick: copyCredentials },
+						copiedField === 'credentials' ? t('common.copied') : t('host.copyCredentials'),
+					),
+					copyFailed ? h('span', { className: 'rdx-error-text' }, t('common.copyFailed')) : null,
+				),
+			);
 			return h(
 				Modal,
 				{
 					t: t,
 					title: editing ? t('host.editTitle') : t('host.addTitle'),
 					onClose: props.onClose,
-					width: 440,
+					width: 480,
 					footer: [
 						h(Btn, { key: 'cancel', onClick: props.onClose }, t('common.cancel')),
 						h(Btn, { key: 'save', variant: 'primary', onClick: submit }, t('host.save')),
@@ -1807,8 +2061,18 @@ window.__ModuleLoader__.load({
 				h(
 					'form',
 					{ className: 'rdx-form', onSubmit: submit },
+					modeField,
 					h('div', { className: 'rdx-field' }, h('span', { className: 'rdx-field-label' }, t('host.name')), h('input', { ref: nameRef, className: 'rdx-input', value: name, placeholder: t('host.namePlaceholder'), onChange: function change(event) { setName(event.target.value); } })),
-					h('div', { className: 'rdx-field' }, h('span', { className: 'rdx-field-label' }, t('host.address')), h('input', { className: 'rdx-input', value: address, placeholder: t('host.addressPlaceholder'), spellCheck: false, onChange: function change(event) { setAddress(event.target.value); } }), h('span', { className: 'rdx-hint' }, t('host.addressHint'))),
+					mode === 'relay'
+						? relayFields
+						: h(
+								'div',
+								{ className: 'rdx-field' },
+								h('span', { className: 'rdx-field-label' }, t('host.address')),
+								h('input', { className: 'rdx-input', value: address, placeholder: t('host.addressPlaceholder'), spellCheck: false, onChange: function change(event) { setAddress(event.target.value); } }),
+								h('span', { className: 'rdx-hint' }, t('host.addressHint')),
+							),
+					mode === 'relay' ? null : h('div', { className: 'rdx-hint' }, t('host.modeDirectHint')),
 					h('div', { className: 'rdx-field' }, h('span', { className: 'rdx-field-label' }, t('host.password')), h('input', { className: 'rdx-input', type: 'password', value: password, placeholder: t('host.passwordPlaceholder'), autoComplete: 'off', onChange: function change(event) { setPassword(event.target.value); } }), h('span', { className: 'rdx-hint' }, t('host.passwordHint'))),
 					error ? h('div', { className: 'rdx-error-text' }, error) : null,
 				),
@@ -1817,30 +2081,25 @@ window.__ModuleLoader__.load({
 
 		function DeployGuide(props) {
 			const t = props.t;
-			const [copied, setCopied] = useState(false);
+			const [copiedTarget, setCopiedTarget] = useState(null);
 			const [copyFailed, setCopyFailed] = useState(false);
 			const command = t('deploy.command', { port: DEFAULT_PORT });
+			const origin = safePageOrigin();
 			useEffect(function resetCopiedState() {
-				if (!copied) return undefined;
+				if (!copiedTarget) return undefined;
 				const timer = setTimeout(function clearCopyLabel() {
-					setCopied(false);
+					setCopiedTarget(null);
 				}, 1600);
 				return function cleanup() {
 					clearTimeout(timer);
 				};
-			}, [copied]);
-			const copy = function copyCommand() {
+			}, [copiedTarget]);
+			const copy = async function copy(target, text) {
 				setCopyFailed(false);
-				if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-					navigator.clipboard.writeText(command).then(
-						function done() {
-							setCopied(true);
-						},
-						function failed() {
-							setCopyFailed(true);
-						},
-					);
-				} else {
+				try {
+					await copyClipboardText(text);
+					setCopiedTarget(target);
+				} catch (failure) {
 					setCopyFailed(true);
 				}
 			};
@@ -1865,10 +2124,32 @@ window.__ModuleLoader__.load({
 					h(
 						'div',
 						{ className: 'rdx-row' },
-						h(Btn, { size: 'sm', icon: copied ? 'copy' : 'copy', onClick: copy }, copied ? t('common.copied') : t('common.copy')),
+						h(
+							Btn,
+							{ size: 'sm', icon: 'copy', onClick: function copyCommand() { copy('command', command); } },
+							copiedTarget === 'command' ? t('common.copied') : t('common.copy'),
+						),
 						copyFailed ? h('span', { className: 'rdx-error-text' }, t('common.copyFailed')) : null,
 					),
 					h('p', { className: 'rdx-hint' }, t('deploy.note')),
+				),
+				h(
+					'div',
+					{ className: 'rdx-relay-guide' },
+					h('div', { className: 'rdx-relay-title' }, t('deploy.relayTitle')),
+					h('p', { className: 'rdx-hint' }, t('deploy.relayStep')),
+					origin
+						? h(
+								'div',
+								{ className: 'rdx-row' },
+								h('code', { className: 'rdx-code rdx-code-inline' }, origin),
+								h(
+									Btn,
+									{ size: 'sm', icon: 'copy', onClick: function copyRelay() { copy('relay', origin); } },
+									copiedTarget === 'relay' ? t('common.copied') : t('host.copyRelayFile'),
+								),
+							)
+						: null,
 				),
 				h(
 					'button',
@@ -1894,7 +2175,19 @@ window.__ModuleLoader__.load({
 					{ className: 'rdx-connect-card' },
 					h('span', { className: 'rdx-empty-icon' }, h(Icon, { name: 'monitor', size: 40 })),
 					h('h2', null, host.name),
-					h('div', { className: 'rdx-addr' }, host.address),
+					h(
+						'div',
+						{ className: 'rdx-addr' },
+						host.mode === 'relay'
+							? h(
+									'span',
+									{ className: 'rdx-addr-line' },
+									h('span', { className: 'rdx-badge' }, t('host.relayBadge')),
+									h('span', { className: 'rdx-addr-code' }, host.code),
+								)
+							: h('span', { className: 'rdx-addr-line' }, host.address),
+						host.mode === 'relay' ? h('div', { className: 'rdx-hint' }, t('host.relayHint')) : null,
+					),
 					h('div', { className: 'rdx-row' }, h(StatusDot, { state: status }), h('span', { className: 'rdx-muted' }, t('state.' + status))),
 					h('div', { className: 'rdx-row' }, h(Icon, { name: 'key', size: 14 }), h('span', { className: 'rdx-muted' }, host.password ? t('host.passwordSaved') : t('host.passwordMissing'))),
 					errorText ? h('div', { className: 'rdx-error-text' }, errorText) : null,
@@ -3214,6 +3507,7 @@ window.__ModuleLoader__.load({
 			const screenAvailable = Boolean(welcome && welcome.screen);
 			const platformName = platformLabel(t, welcome && welcome.agent ? welcome.agent.platform : null);
 			const encodingName = encodingLabel(t, encoding);
+			const connectionName = host.mode === 'relay' ? t('host.relayBadge') + ' · ' + host.code : host.address;
 
 			const handleCapturedChange = useCallback(function handleCapturedChange(next) {
 				setCaptured(Boolean(next));
@@ -3289,14 +3583,13 @@ window.__ModuleLoader__.load({
 						{ className: 'rdx-toolbar-title' },
 						h(StatusDot, { state: status }),
 						h('span', { className: 'rdx-toolbar-host' }, host.name),
-						platformName || encodingName
-							? h(
-									'span',
-									{ className: 'rdx-toolbar-meta' },
-									platformName ? h('span', { className: 'rdx-toolbar-chip', title: t('toolbar.platform') }, platformName) : null,
-									encodingName ? h('span', { className: 'rdx-toolbar-chip', title: t('toolbar.encoding') }, encodingName) : null,
-								)
-							: null,
+						h(
+							'span',
+							{ className: 'rdx-toolbar-meta' },
+							h('span', { className: 'rdx-toolbar-chip', title: t('host.connection') }, connectionName),
+							platformName ? h('span', { className: 'rdx-toolbar-chip', title: t('toolbar.platform') }, platformName) : null,
+							encodingName ? h('span', { className: 'rdx-toolbar-chip', title: t('toolbar.encoding') }, encodingName) : null,
+						),
 						reconnecting
 							? h('span', { className: 'rdx-muted rdx-toolbar-note' }, t('session.reconnecting', {
 									attempt: stateInfo && stateInfo.attempt ? stateInfo.attempt : 1,
@@ -3623,6 +3916,11 @@ window.__ModuleLoader__.load({
 			}, []);
 
 			const saveHost = useCallback(function saveHost(draft) {
+				// Persist only the fields the selected mode owns, so switching a host
+				// between direct and relay never leaves a stale address/code behind.
+				const fields = draft.mode === 'relay'
+					? { name: draft.name, mode: 'relay', code: draft.code, password: draft.password }
+					: { name: draft.name, mode: 'direct', address: draft.address, password: draft.password };
 				if (editor && editor.mode === 'edit' && editor.host) {
 					const targetId = editor.host.id;
 					const existing = clients.get(targetId);
@@ -3638,17 +3936,11 @@ window.__ModuleLoader__.load({
 					}
 					setHosts(function replaceHosts(current) {
 						return current.map(function replace(host) {
-							return host.id === targetId ? Object.assign({}, host, { name: draft.name, address: draft.address, password: draft.password }) : host;
+							return host.id === targetId ? Object.assign({ id: targetId, createdAt: editor.host.createdAt }, fields) : host;
 						});
 					});
 				} else {
-					const created = {
-						id: newHostId(),
-						name: draft.name,
-						address: draft.address,
-						password: draft.password,
-						createdAt: Date.now(),
-					};
+					const created = Object.assign({ id: newHostId(), createdAt: Date.now() }, fields);
 					setHosts(function appendHost(current) {
 						return current.concat([created]);
 					});
@@ -3815,6 +4107,18 @@ window.__ModuleLoader__.load({
 			'.rdx-toolbar-note{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
 			'.rdx-toolbar-meta{display:flex;align-items:center;gap:4px;flex:none;min-width:0;overflow:hidden}',
 			'.rdx-toolbar-chip{display:inline-block;max-width:120px;padding:0 6px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+			'.rdx-badge{display:inline-block;flex:none;margin-right:5px;padding:0 4px;border:1px solid var(--dsw-alias-border-l1);border-radius:4px;color:var(--dsw-alias-brand-primary);font-size:10px;line-height:14px}',
+			'.rdx-host-addr-line{display:inline-flex;align-items:center;min-width:0;max-width:100%}',
+			'.rdx-host-code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}',
+			'.rdx-addr-line{display:inline-flex;align-items:center;gap:6px}',
+			'.rdx-addr-code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.02em}',
+			'.rdx-modes{display:flex;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;overflow:hidden}',
+			'.rdx-mode{flex:1;min-width:0;height:28px;padding:0 8px;border:none;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+			'.rdx-mode:hover{background:var(--dsw-alias-bg-layer-1)}',
+			'.rdx-mode-active{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-weight:500}',
+			'.rdx-relay-guide{display:flex;flex-direction:column;gap:8px;width:100%;padding:10px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-layer-1)}',
+			'.rdx-relay-title{font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary)}',
+			'.rdx-code-inline{display:inline-block;margin:0;padding:3px 6px;max-width:100%;overflow-x:auto;font-size:11px}',
 			'.rdx-toolbar-spacer{flex:1;min-width:8px}',
 			'.rdx-fps{display:flex;align-items:center;gap:4px;flex:none;font-size:12px}',
 			'.rdx-select{height:28px;padding:0 6px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}',
@@ -3889,6 +4193,7 @@ window.__ModuleLoader__.load({
 			'.rdx-term-prompt{flex:none;color:var(--dsw-alias-label-secondary);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}',
 			'.rdx-term-hint{flex:none;padding:0 10px 8px;font-size:11px;color:var(--dsw-alias-label-secondary)}',
 			'.rdx-term-unsupported{display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:24px 14px;font-size:12px;color:var(--dsw-alias-label-secondary)}',
+			'.rdx-note{padding:8px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:1.5}',
 			'.rdx-form{display:flex;flex-direction:column;gap:10px}',
 			'.rdx-dialog-overlay{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--dsw-alias-bg-overlay)}',
 			'.rdx-dialog{display:flex;flex-direction:column;width:100%;max-width:420px;max-height:90vh;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}',
